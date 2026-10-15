@@ -1,0 +1,149 @@
+const pool = require("./src/db");
+const crypto = require("crypto");
+
+const SAMPLE_BUYERS = [
+  { name: "Budi Santoso", city: "Jakarta Selatan" },
+  { name: "Siti Nurhaliza", city: "Kota Bogor" },
+  { name: "Ahmad Fauzi", city: "Depok" },
+  { name: "Rina Wulandari", city: "Bandung" },
+  { name: "Hendra Wijaya", city: "Tangerang" },
+];
+
+const STATUSES = [
+  "pending_payment", "paid", "processing", "shipped", "completed",
+];
+
+(async () => {
+  try {
+    console.log("=== Cek data existing ===");
+    const [existing] = await pool.execute("SELECT COUNT(*) n FROM orders");
+    console.log("Orders existing:", existing[0].n);
+
+    if (existing[0].n > 0) {
+      console.log("⚠️ Sudah ada order, skip seed");
+      process.exit(0);
+    }
+
+    // Ambil data pendukung
+    const [variants] = await pool.execute(
+      `SELECT pv.id AS variant_id, pv.product_id, pv.price, 
+              pv.variant_name, pv.sku, p.name AS product_name, p.business_id
+       FROM product_variants pv
+       JOIN products p ON p.id = pv.product_id
+       WHERE pv.is_active = 1 LIMIT 10`
+    );
+    if (variants.length === 0) {
+      console.log("❌ Tidak ada variant.");
+      process.exit(1);
+    }
+
+    const businessId = variants[0].business_id;
+    console.log(`✅ Found: ${variants.length} variants, business_id=${businessId}`);
+
+    console.log("\n=== Insert sample orders ===");
+
+    for (let i = 0; i < 5; i++) {
+      const buyer = SAMPLE_BUYERS[i];
+      const status = STATUSES[i];
+      const orderNumber = `ORD-${new Date().getFullYear()}-${String(i + 1).padStart(4, "0")}`;
+      const publicId = crypto.randomUUID();
+
+      const variant = variants[i % variants.length];
+      const qty = 2 + i;
+      const price = Number(variant.price);
+      const subtotal = price * qty;
+      const shipping = 15000;
+      const grand = subtotal + shipping;
+
+      const placedAt = new Date();
+      placedAt.setDate(placedAt.getDate() - i);
+      placedAt.setHours(10 + i, 30, 0, 0);
+
+      const shippingAddress = JSON.stringify({
+        name: buyer.name,
+        phone: "081234567890",
+        address: `Jl. Contoh No. ${i + 1}`,
+        city: buyer.city,
+        province: "DKI Jakarta",
+        postal_code: "12345",
+      });
+
+      // Insert order
+      const [orderResult] = await pool.execute(
+        `INSERT INTO orders (
+          public_id, order_number, buyer_user_id, status, currency,
+          subtotal, discount_total, shipping_total, tax_total, platform_fee,
+          grand_total, shipping_address, placed_at, paid_at
+        ) VALUES (?, ?, ?, ?, 'IDR', ?, 0, ?, 0, 0, ?, ?, ?, ?)`,
+        [
+          publicId, orderNumber, 1, status,
+          subtotal, shipping, grand,
+          shippingAddress,
+          placedAt,
+          status !== "pending_payment" ? placedAt : null,
+        ]
+      );
+
+      const orderId = orderResult.insertId;
+
+      // Insert order item (sesuai struktur: business_id, product_id, variant_id, product_name, variant_name, sku, quantity, unit_price, line_total)
+      await pool.execute(
+        `INSERT INTO order_items (
+          order_id, business_id, product_id, variant_id,
+          product_name, variant_name, sku,
+          quantity, unit_price, discount_amount, line_total
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+        [
+          orderId, variant.business_id, variant.product_id, variant.variant_id,
+          variant.product_name, variant.variant_name, variant.sku,
+          qty, price, subtotal,
+        ]
+      );
+
+      console.log(`  ✓ ${orderNumber} (${status}) - Rp ${grand.toLocaleString("id-ID")}`);
+    }
+
+    // Insert shipments
+    console.log("\n=== Insert shipments ===");
+    const [shippedOrders] = await pool.execute(
+      `SELECT id FROM orders WHERE status IN ('shipped', 'completed')`
+    );
+
+    const COURIERS = [
+      { courier: "JNE", service: "REG" },
+      { courier: "J&T Express", service: "EZ" },
+      { courier: "SiCepat", service: "REG" },
+    ];
+
+    let shipIdx = 0;
+    for (const order of shippedOrders) {
+      const c = COURIERS[shipIdx % COURIERS.length];
+      await pool.execute(
+        `INSERT INTO shipments (
+          order_id, business_id, courier, service_name, tracking_number,
+          status, shipping_cost, shipped_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          order.id, businessId, c.courier, c.service,
+          `${c.courier.replace(/\s/g, "").toUpperCase()}${Date.now()}${order.id}`,
+          "in_transit", 15000, new Date(),
+        ]
+      );
+      console.log(`  ✓ Shipment untuk order #${order.id} via ${c.courier}`);
+      shipIdx++;
+    }
+
+    // Summary
+    console.log("\n=== Summary ===");
+    const [orders] = await pool.execute(
+      "SELECT status, COUNT(*) n FROM orders GROUP BY status"
+    );
+    console.table(orders);
+
+    process.exit(0);
+  } catch (err) {
+    console.error("❌", err.message);
+    console.error(err.sqlMessage || err);
+    process.exit(1);
+  }
+})();

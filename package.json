@@ -1,0 +1,24 @@
+{
+  "name": "nusadhipa-marketplace-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dedicated API for NUSA-DHIPA Marketplace",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.4.0",
+    "mysql2": "^3.14.0"
+  }
+}
