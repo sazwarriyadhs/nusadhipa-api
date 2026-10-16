@@ -21,19 +21,29 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
   contentSecurityPolicy: false,
 }));
+// Pattern untuk dev — semua localhost + LAN IP (Flutter Web port random)
+const devOriginPatterns = [
+  /^http:\/\/localhost(:\d+)?$/,
+  /^http:\/\/127\.0\.0\.1(:\d+)?$/,
+  /^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/,
+  /^http:\/\/10\.\d+\.\d+\.\d+(:\d+)?$/,
+];
+
 app.use(cors({
   origin(origin, callback) {
-    // DEV MODE: izinkan semua origin (termasuk Flutter Web dev server)
-    if (process.env.NODE_ENV !== "production") {
-      return callback(null, true);
-    }
-    // PRODUCTION: whitelist ketat
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin) return callback(null, true);
+    if (process.env.NODE_ENV !== "production") return callback(null, true);
+    if (
+      allowedOrigins.includes(origin) ||
+      devOriginPatterns.some((p) => p.test(origin))
+    ) {
       return callback(null, true);
     }
     return callback(new Error("Origin tidak diizinkan oleh CORS"));
   },
   credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
 }));
 app.use(express.json({ limit: "1mb" }));
 
