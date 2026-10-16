@@ -486,4 +486,55 @@ router.delete("/products/:publicId", asyncRoute(async (req, res) => {
   });
 }));
 
+
+// ============================================================
+// GET /api/v1/businesses/:slug — Public business detail
+// ============================================================
+router.get("/businesses/:slug", asyncRoute(async (req, res) => {
+  const slug = String(req.params.slug || "").trim();
+  if (!slug) {
+    return res.status(400).json({
+      success: false,
+      error: { code: "INVALID_SLUG", message: "Slug tidak valid." }
+    });
+  }
+
+  const [rows] = await db.execute(`
+    SELECT 
+      b.id, b.public_id, b.business_name, b.legal_name, b.slug,
+      b.business_type, b.description, b.logo_url, b.banner_url,
+      b.email, b.phone, b.province, b.city, b.address,
+      b.nib, b.tax_number, b.kbli_code, b.kbli_name,
+      b.verification_status, b.status,
+      (SELECT COUNT(*) FROM products p 
+       WHERE p.business_id = b.id AND p.status = 'active') AS product_count
+    FROM businesses b
+    WHERE b.slug = ? AND b.status = 'active'
+    LIMIT 1
+  `, [slug]);
+
+  if (!rows.length) {
+    return res.status(404).json({
+      success: false,
+      error: { code: "BUSINESS_NOT_FOUND", message: "Toko tidak ditemukan." }
+    });
+  }
+
+  const business = rows[0];
+
+  const [kbli] = await db.execute(`
+    SELECT kbli_code AS code, kbli_name AS name, is_primary
+    FROM business_kbli
+    WHERE business_id = ?
+    ORDER BY is_primary DESC
+  `, [business.id]);
+
+  delete business.id;
+
+  res.json({
+    success: true,
+    data: { ...business, kbli_list: kbli }
+  });
+}));
+
 module.exports = router;
