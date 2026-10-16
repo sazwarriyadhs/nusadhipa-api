@@ -41,3 +41,6 @@ test-*.jpg
 # Uploads (public folder)
 public/uploads/*
 !public/uploads/.gitkeep
+
+*.bak*
+*.bak*

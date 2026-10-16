@@ -58,6 +58,14 @@ app.use("/uploads", (req, res, next) => {
 }, express.static(path.join(publicDir, "uploads")));
 console.log(`📁 Static /uploads → ${path.join(publicDir, "uploads")}`);
 
+// Serve folder /sauri — gambar produk SAURI (bundled)
+app.use("/sauri", (req, res, next) => {
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  next();
+}, express.static(path.join(publicDir, "sauri")));
+console.log(`📁 Static /sauri → ${path.join(publicDir, "sauri")}`);
+
 app.get("/api/v1/health", (_req, res) => {
   res.json({
     success: true,
