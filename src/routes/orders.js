@@ -248,6 +248,10 @@ router.post(
     const [variants] = await db.execute(
       `SELECT 
         pv.id, pv.product_id, pv.variant_name, pv.sku, pv.price,
+        pv.sales_mode, pv.selling_unit, pv.quantity_step, pv.weight_grams,
+        pv.retail_price, pv.b2b_price,
+        pv.min_retail_kg, pv.min_b2b_kg,
+        pv.retail_step_kg, pv.b2b_step_kg,
         p.name AS product_name, p.business_id,
         COALESCE(inv.quantity_on_hand, 0) - COALESCE(inv.quantity_reserved, 0) AS available_stock
        FROM product_variants pv
@@ -269,21 +273,116 @@ router.post(
     let totalWeight = 0;
     const orderItems = [];
 
+    // Ambil customer_type buyer
+    const [buyerRows] = await db.execute(
+      `SELECT customer_type FROM users WHERE id = ? LIMIT 1`,
+      [buyerUserId]
+    );
+    const customerType = buyerRows.length > 0
+      ? (buyerRows[0].customer_type || "retail")
+      : "retail";
+
     for (const item of items) {
       const variant = variants.find((v) => v.id === Number(item.variant_id));
-      const qty = Math.max(1, Math.floor(Number(item.quantity) || 1));
+      if (!variant) continue;
+
+      if (!["package", "weight"].includes(variant.sales_mode)) {
+        return res.status(400).json({
+          success: false,
+          message: `Varian "${variant.product_name}" belum diklasifikasikan untuk penjualan.`,
+        });
+      }
+
+      const isPackage = variant.sales_mode === "package";
+      const isKg = variant.selling_unit === "kg";
+      if ((isPackage && isKg) || (!isPackage && !isKg)) {
+        return res.status(400).json({
+          success: false,
+          message: `Konfigurasi satuan varian "${variant.product_name}" tidak valid.`,
+        });
+      }
+
+      let minQty, step, price, unit;
+
+      if (isPackage) {
+        minQty = 1;
+        step = 1;
+        price = Number(variant.retail_price ?? variant.price);
+        unit = "unit";
+      } else {
+        const minRetail = Number(variant.min_retail_kg ?? 0.5);
+        const minB2B = Number(variant.min_b2b_kg ?? 50);
+        const stepRetail = Number(variant.retail_step_kg ?? 0.5);
+        const stepB2B = Number(variant.b2b_step_kg ?? 1);
+        const priceRetail = Number(variant.retail_price ?? variant.price);
+        const priceB2B = variant.b2b_price == null ? null : Number(variant.b2b_price);
+        const requestedQty = item.quantity;
+        const useB2B = customerType === "b2b" ||
+          (customerType === "retail" && Number(requestedQty) >= minB2B);
+
+        if (useB2B) {
+          minQty = minB2B;
+          step = stepB2B;
+          price = priceB2B;
+          if (price === null || !Number.isFinite(price) || price <= 0) {
+            return res.status(400).json({
+              success: false,
+              message: `Harga B2B "${variant.product_name}" belum ditetapkan.`,
+            });
+          }
+        } else {
+          minQty = minRetail;
+          step = stepRetail;
+          price = priceRetail;
+        }
+        unit = "kg";
+      }
+
+      const rawQty = item.quantity;
+      if (rawQty === undefined || rawQty === null || rawQty === "" || typeof rawQty === "boolean") {
+        return res.status(400).json({ success: false, message: "Quantity wajib berupa angka positif." });
+      }
+
+      const qty = Number(rawQty);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        return res.status(400).json({ success: false, message: "Quantity wajib berupa angka positif." });
+      }
+      if (!Number.isFinite(minQty) || minQty <= 0 ||
+          !Number.isFinite(step) || step <= 0) {
+        return res.status(400).json({ success: false, message: "Aturan quantity varian tidak valid." });
+      }
+      if (qty < minQty) {
+        return res.status(400).json({
+          success: false,
+          message: `Minimum pembelian "${variant.product_name}" adalah ${minQty} ${unit}.`,
+        });
+      }
+      if (Math.abs(qty / step - Math.round(qty / step)) > 1e-8 ||
+          (unit !== "kg" && !Number.isInteger(qty))) {
+        return res.status(400).json({
+          success: false,
+          message: `Quantity "${variant.product_name}" harus mengikuti kelipatan ${step} ${unit}.`,
+        });
+      }
+      if (!Number.isFinite(price) || price <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Harga "${variant.product_name}" belum ditetapkan.`,
+        });
+      }
 
       if (qty > Number(variant.available_stock)) {
         return res.status(400).json({
           success: false,
-          message: `Stok "${variant.product_name}" tidak cukup. Tersedia: ${variant.available_stock}`,
+          message: `Stok "${variant.product_name}" tidak cukup. Tersedia: ${variant.available_stock} ${unit}`,
         });
       }
 
-      const price = Number(variant.price);
-      const lineTotal = price * qty;
+      const lineTotal = Math.round(price * qty * 100) / 100;
       subtotal += lineTotal;
-      totalWeight += qty; // asumsi 1 unit = 1 kg
+      totalWeight += unit === "kg"
+        ? qty * 1000
+        : qty * (Number(variant.weight_grams) || 0);
 
       orderItems.push({
         variant_id: variant.id,
@@ -295,6 +394,7 @@ router.post(
         quantity: qty,
         line_total: lineTotal,
         business_id: variant.business_id,
+        selling_unit: unit,
       });
     }
 
@@ -317,37 +417,113 @@ router.post(
 
     const shippingAddressJson = JSON.stringify(shipping_address);
 
-    const [orderResult] = await db.execute(
-      `INSERT INTO orders (
-        public_id, order_number, buyer_user_id, status, currency,
-        subtotal, discount_total, shipping_total, tax_total, platform_fee,
-        grand_total, shipping_address, customer_note, placed_at, shipping_distance_km
-      ) VALUES (?, ?, ?, 'pending_payment', 'IDR', ?, 0, ?, 0, 0, ?, ?, ?, ?, ?)`,
-      [
-        publicId, orderNumber, buyerUserId,
-        subtotal, shippingTotal, grandTotal,
-        shippingAddressJson, customer_note || null, now,
-        distance || null,
-      ]
-    );
+    const conn = await db.getConnection();
+    let orderId;
+    try {
+      await conn.beginTransaction();
 
-    const orderId = orderResult.insertId;
+      // Kunci stok di dalam transaksi agar checkout bersamaan tidak oversell.
+      const lockIds = [...new Set(variantIds)].sort((a, b) => a - b);
+      const lockPlaceholders = lockIds.map(() => "?").join(",");
+      const [lockedInventory] = await conn.execute(
+        `SELECT variant_id, quantity_on_hand, quantity_reserved
+         FROM inventory
+         WHERE variant_id IN (${lockPlaceholders})
+         ORDER BY variant_id
+         FOR UPDATE`,
+        lockIds
+      );
 
-    // ===== INSERT ORDER ITEMS =====
-    for (const item of orderItems) {
-      await db.execute(
-        `INSERT INTO order_items (
-          order_id, business_id, product_id, variant_id,
-          product_name, variant_name, sku,
-          quantity, unit_price, discount_amount, line_total
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+      const inventoryByVariant = new Map(
+        lockedInventory.map((row) => [
+          Number(row.variant_id),
+          Number(row.quantity_on_hand) - Number(row.quantity_reserved),
+        ])
+      );
+
+      for (const item of orderItems) {
+        const available = inventoryByVariant.get(Number(item.variant_id));
+        if (available === undefined || !Number.isFinite(available) ||
+            available < 0 || Number(item.quantity) > available) {
+          await conn.rollback();
+          conn.release();
+          return res.status(400).json({
+            success: false,
+            message: available === undefined
+              ? `Data stok varian ${item.variant_id} belum tersedia.`
+              : `Stok varian ${item.variant_id} tidak cukup. Tersedia: ${available}.`,
+          });
+        }
+      }
+
+      const [orderResult] = await conn.execute(
+        `INSERT INTO orders (
+          public_id, order_number, buyer_user_id, status, currency,
+          subtotal, discount_total, shipping_total, tax_total, platform_fee,
+          grand_total, shipping_address, customer_note, placed_at, shipping_distance_km
+        ) VALUES (?, ?, ?, 'pending_payment', 'IDR', ?, 0, ?, 0, 0, ?, ?, ?, ?, ?)`,
         [
-          orderId, item.business_id, item.product_id, item.variant_id,
-          item.product_name, item.variant_name, item.sku,
-          item.quantity, item.unit_price, item.line_total,
+          publicId, orderNumber, buyerUserId,
+          subtotal, shippingTotal, grandTotal,
+          shippingAddressJson, customer_note || null, now,
+          distance || null,
         ]
       );
+      orderId = orderResult.insertId;
+
+      for (const item of orderItems) {
+        await conn.execute(
+          `INSERT INTO order_items (
+            order_id, business_id, product_id, variant_id,
+            product_name, variant_name, sku,
+            quantity, unit_price, discount_amount, line_total
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+          [
+            orderId, item.business_id, item.product_id, item.variant_id,
+            item.product_name, item.variant_name, item.sku,
+            item.quantity, item.unit_price, item.line_total,
+          ]
+        );
+
+        // MariaDB bug: INSERT ... ON DUPLICATE + CHECK constraint gagal
+        // Solusi: UPDATE dulu, fallback ke INSERT kalau tidak ada
+        const [updResult] = await conn.execute(
+          `UPDATE inventory
+           SET quantity_reserved = quantity_reserved + ?,
+               updated_at = NOW()
+           WHERE variant_id = ?`,
+          [item.quantity, item.variant_id]
+        );
+
+        if (updResult.affectedRows === 0) {
+          // Row belum ada — buat baru dengan reserved = 0 dulu
+          await conn.execute(
+            `INSERT INTO inventory (variant_id, quantity_on_hand, quantity_reserved)
+             VALUES (?, 0, 0)`,
+            [item.variant_id]
+          );
+          // Lalu update reserved
+          await conn.execute(
+            `UPDATE inventory
+             SET quantity_reserved = quantity_reserved + ?,
+                 updated_at = NOW()
+             WHERE variant_id = ?`,
+            [item.quantity, item.variant_id]
+          );
+        }
+      }
+
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      conn.release();
+      console.error("Checkout transaction failed:", err);
+      return res.status(500).json({
+        success: false,
+        message: "Gagal membuat pesanan.",
+      });
     }
+    conn.release();
 
     res.status(201).json({
       success: true,
@@ -387,23 +563,91 @@ router.patch(
       });
     }
 
-    const [result] = await db.execute(
-      `UPDATE orders SET status = ?, updated_at = NOW() WHERE public_id = ?`,
-      [status, publicId]
-    );
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
 
-    if (result.affectedRows === 0) {
-      return res.status(404).json({
+      const [orders] = await conn.execute(
+        `SELECT id, status FROM orders WHERE public_id = ? LIMIT 1`,
+        [publicId]
+      );
+      if (orders.length === 0) {
+        await conn.rollback();
+        conn.release();
+        return res.status(404).json({
+          success: false,
+          message: "Order tidak ditemukan.",
+        });
+      }
+      const order = orders[0];
+      const prevStatus = order.status;
+
+      const tsUpdates = [];
+      if (status === "paid" && !["paid", "completed"].includes(prevStatus)) {
+        tsUpdates.push("paid_at = NOW()");
+      }
+      if (status === "completed") {
+        tsUpdates.push("completed_at = NOW()");
+      }
+      if (["cancelled", "refunded"].includes(status)) {
+        tsUpdates.push("cancelled_at = NOW()");
+      }
+
+      await conn.execute(
+        `UPDATE orders SET status = ?, updated_at = NOW()
+         ${tsUpdates.length ? ", " + tsUpdates.join(", ") : ""}
+         WHERE id = ?`,
+        [status, order.id]
+      );
+
+      const [orderItems] = await conn.execute(
+        `SELECT variant_id, quantity FROM order_items WHERE order_id = ?`,
+        [order.id]
+      );
+
+      if (status === "paid" && prevStatus !== "paid") {
+        for (const it of orderItems) {
+          await conn.execute(
+            `UPDATE inventory
+             SET quantity_on_hand = GREATEST(0, quantity_on_hand - ?),
+                 quantity_reserved = GREATEST(0, quantity_reserved - ?)
+             WHERE variant_id = ?`,
+            [it.quantity, it.quantity, it.variant_id]
+          );
+        }
+      }
+
+      if (
+        ["cancelled", "refunded"].includes(status) &&
+        !["cancelled", "refunded"].includes(prevStatus)
+      ) {
+        for (const it of orderItems) {
+          await conn.execute(
+            `UPDATE inventory
+             SET quantity_reserved = GREATEST(0, quantity_reserved - ?)
+             WHERE variant_id = ?`,
+            [it.quantity, it.variant_id]
+          );
+        }
+      }
+
+      await conn.commit();
+      conn.release();
+
+      res.json({
+        success: true,
+        message: "Status order berhasil diupdate.",
+        data: { public_id: publicId, status },
+      });
+    } catch (err) {
+      await conn.rollback();
+      conn.release();
+      console.error("Update status error:", err);
+      return res.status(500).json({
         success: false,
-        message: "Order tidak ditemukan.",
+        message: "Gagal update status.",
       });
     }
-
-    res.json({
-      success: true,
-      message: "Status order berhasil diupdate.",
-      data: { public_id: publicId, status },
-    });
   })
 );
 
