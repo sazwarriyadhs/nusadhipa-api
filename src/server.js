@@ -68,7 +68,7 @@ app.get("/api/v1/health/db", async (_req, res) => {
 
     const db = rows[0];
 
-    if (db.database_name !== "nusadhipa_marketplace") {
+    if (db.database_name !== (process.env.DB_NAME || "nusadhipa_marketplace")) {
       return res.status(503).json({
         success: false,
         error: "Database aktif tidak sesuai konfigurasi marketplace"
