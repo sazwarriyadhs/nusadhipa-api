@@ -1,7 +1,43 @@
+# Dependencies
 node_modules/
+
+# Environment
 .env
-.env.*
-!.env.example
+.env.local
+.env.production
+.env.*.local
+.jwt-secret.local
+
+# Database backups
+db-backup/
+*.sql.gz
+*.dump
+
+# Backup files
+*.bak
+*.bak_*
+*.bak-*
+*.tmp
+*.tmp_*
+
+# Logs
+*.log
 npm-debug.log*
 
-.jwt-secret.local
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test files
+test-*.png
+test-*.jpg
+
+# Uploads (public folder)
+public/uploads/*
+!public/uploads/.gitkeep
