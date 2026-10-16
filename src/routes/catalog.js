@@ -49,6 +49,21 @@ router.get("/products", asyncRoute(async (req, res) => {
     params.push(req.query.category.trim());
   }
 
+  // Filter by business slug
+  if (typeof req.query.business === "string" && req.query.business.trim()) {
+    conditions.push("b.slug = ?");
+    params.push(req.query.business.trim());
+  }
+
+  // Filter by business_id (numeric)
+  if (req.query.business_id) {
+    const bid = Number.parseInt(req.query.business_id, 10);
+    if (Number.isSafeInteger(bid) && bid > 0) {
+      conditions.push("b.id = ?");
+      params.push(bid);
+    }
+  }
+
   if (typeof req.query.q === "string" && req.query.q.trim()) {
     const term = `%${req.query.q.trim().slice(0, 100)}%`;
     conditions.push("(p.name LIKE ? OR p.short_description LIKE ? OR p.brand LIKE ?)");
