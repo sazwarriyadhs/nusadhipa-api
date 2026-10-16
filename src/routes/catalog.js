@@ -537,4 +537,29 @@ router.get("/businesses/:slug", asyncRoute(async (req, res) => {
   });
 }));
 
+
+// ============================================================
+// GET /api/v1/businesses — Public list semua business aktif
+// ============================================================
+router.get("/businesses", asyncRoute(async (req, res) => {
+  const [rows] = await db.execute(`
+    SELECT 
+      b.public_id, b.business_name, b.legal_name, b.slug,
+      b.business_type, b.description, b.logo_url, b.banner_url,
+      b.email, b.phone, b.province, b.city, b.address,
+      b.nib, b.kbli_code, b.kbli_name,
+      b.verification_status, b.status,
+      (SELECT COUNT(*) FROM products p 
+       WHERE p.business_id = b.id AND p.status = 'active') AS product_count
+    FROM businesses b
+    WHERE b.status = 'active'
+    ORDER BY b.business_name ASC
+  `);
+
+  res.json({
+    success: true,
+    data: rows
+  });
+}));
+
 module.exports = router;
