@@ -1,3 +1,4 @@
+const requireAuth = require('../middleware/require-auth');
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const fs = require("fs");
@@ -156,10 +157,18 @@ router.get("/businesses/me", async (req, res, next) => {
 // ============================================================
 router.post(
   "/businesses/me/logo",
+  requireAuth,
   businessUpload.single("logo"),
   async (req, res, next) => {
     try {
-      const businessId = 1;
+      const [bizRows] = await db.execute(
+        "SELECT id FROM businesses WHERE owner_user_id = ? LIMIT 1",
+        [req.user.id]
+      );
+      if (!bizRows.length) {
+        return res.status(404).json({ success: false, message: "Business tidak ditemukan" });
+      }
+      const businessId = bizRows[0].id;
       if (!req.file) {
         return res.status(400).json({
           success: false,
@@ -189,10 +198,18 @@ router.post(
 // ============================================================
 router.post(
   "/businesses/me/banner",
+  requireAuth,
   businessUpload.single("banner"),
   async (req, res, next) => {
     try {
-      const businessId = 1;
+      const [bizRows] = await db.execute(
+        "SELECT id FROM businesses WHERE owner_user_id = ? LIMIT 1",
+        [req.user.id]
+      );
+      if (!bizRows.length) {
+        return res.status(404).json({ success: false, message: "Business tidak ditemukan" });
+      }
+      const businessId = bizRows[0].id;
       if (!req.file) {
         return res.status(400).json({
           success: false,
@@ -220,9 +237,16 @@ router.post(
 // ============================================================
 // PUT /businesses/me — Update info bisnis
 // ============================================================
-router.put("/businesses/me", async (req, res, next) => {
+router.put("/businesses/me", requireAuth, async (req, res, next) => {
   try {
-    const businessId = 1;
+    const [bizRows] = await db.execute(
+      "SELECT id FROM businesses WHERE owner_user_id = ? LIMIT 1",
+      [req.user.id]
+    );
+    if (!bizRows.length) {
+      return res.status(404).json({ success: false, message: "Business tidak ditemukan" });
+    }
+    const businessId = bizRows[0].id;
     const {
       business_name,
       description,

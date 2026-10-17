@@ -7,6 +7,13 @@ const secretPath = path.resolve(__dirname, "../../.jwt-secret.local");
 const JWT_ISSUER = "nusadhipa-marketplace";
 
 function getJwtSecret() {
+  // Priority 1: Environment variable (production)
+  if (process.env.JWT_SECRET && process.env.JWT_SECRET.trim()) {
+    const secret = process.env.JWT_SECRET.trim();
+    return secret.length >= 32 ? secret : null;
+  }
+
+  // Priority 2: File (local dev)
   if (!fs.existsSync(secretPath)) return null;
   const secret = fs.readFileSync(secretPath, "utf8").trim();
   return secret.length >= 32 ? secret : null;
