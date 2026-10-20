@@ -121,6 +121,7 @@ app.use("/api/v1", require("./routes/uploads"));
 app.use("/api/v1", require("./routes/catalog"));
 app.use("/api/v1", require("./routes/market-insight"));
 app.use("/api/v1/courier", require("./routes/courier"));
+app.use("/api/v1/admin", require("./routes/admin"));
 
 app.use((req, res) => {
   res.status(404).json({
