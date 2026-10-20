@@ -240,4 +240,34 @@ router.post("/login", async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
+// ============================================================
+// ADMIN (Verifikasi Kurir)
+// ============================================================
+router.get("/admin/list", async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT id, public_id, name, email, phone, vehicle_type, plate_number, city, status, created_at FROM couriers ORDER BY created_at DESC"
+    );
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.put("/admin/:id/status", async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+  if (!["approved", "rejected", "suspended"].includes(status)) {
+    return res.status(400).json({ success: false, message: "Status tidak valid" });
+  }
+  try {
+    await db.execute("UPDATE couriers SET status = ? WHERE id = ?", [status, id]);
+    res.json({ success: true, message: "Status kurir diupdate" });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+
 module.exports = router;
+
