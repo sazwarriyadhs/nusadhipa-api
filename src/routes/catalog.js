@@ -29,7 +29,7 @@ router.get("/categories", asyncRoute(async (req, res) => {
 // GET /api/v1/products?q=...&category=...&page=1&limit=20
 router.get("/products", asyncRoute(async (req, res) => {
   const page = positiveInt(req.query.page, 1, 1000000);
-  const limit = positiveInt(req.query.limit, 20, 100);
+  const limit = positiveInt(req.query.limit, 100, 1000);
   const offset = (page - 1) * limit;
 
   const conditions = [
