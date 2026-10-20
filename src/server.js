@@ -120,6 +120,7 @@ app.use("/api/v1", require("./routes/reports"));
 app.use("/api/v1", require("./routes/uploads"));
 app.use("/api/v1", require("./routes/catalog"));
 app.use("/api/v1", require("./routes/market-insight"));
+app.use("/api/v1/courier", require("./routes/courier"));
 
 app.use((req, res) => {
   res.status(404).json({
@@ -163,6 +164,7 @@ server = app.listen(port, host, () => {
 });
 
 module.exports = app;
+
 
 
 
