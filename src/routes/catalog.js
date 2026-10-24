@@ -103,6 +103,21 @@ router.get("/products", asyncRoute(async (req, res) => {
       variants.min_b2b_price,
       variants.max_b2b_price,
       variants.min_b2b_kg,
+      variants.min_retail_kg,
+      (
+        SELECT pv_unit.selling_unit
+        FROM product_variants pv_unit
+        WHERE pv_unit.product_id = p.id AND pv_unit.is_active = 1
+        ORDER BY pv_unit.id ASC
+        LIMIT 1
+      ) AS selling_unit,
+      (
+        SELECT pv_mode.sales_mode
+        FROM product_variants pv_mode
+        WHERE pv_mode.product_id = p.id AND pv_mode.is_active = 1
+        ORDER BY pv_mode.id ASC
+        LIMIT 1
+      ) AS sales_mode,
       (
         SELECT pi.image_url
         FROM product_images pi
@@ -123,6 +138,7 @@ router.get("/products", asyncRoute(async (req, res) => {
         MIN(pv.b2b_price) AS min_b2b_price,
         MAX(pv.b2b_price) AS max_b2b_price,
         MIN(pv.min_b2b_kg) AS min_b2b_kg,
+        MIN(pv.min_retail_kg) AS min_retail_kg,
         SUM(
           GREATEST(
             COALESCE(i.quantity_on_hand, 0) -
