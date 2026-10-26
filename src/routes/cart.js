@@ -19,72 +19,131 @@ async function getUserCustomerType(conn, userId) {
   return rows.length > 0 ? (rows[0].customer_type || "retail") : "retail";
 }
 
-// ============ Helper: tentukan policy berdasarkan customer_type & qty ============
-function resolvePolicy(variant, customerType, requestedQty) {
+// ============ Helper: policy berdasarkan selling_mode eksplisit ============
+function resolvePolicy(variant, requestedMode) {
+  const brand = String(variant.product_brand ?? variant.brand ?? "")
+    .trim().toLowerCase();
+
   if (!["package", "weight"].includes(variant.sales_mode)) {
-    return { mode: "unclassified", available: false, reason: "Varian belum diklasifikasikan.", minQty: 0, step: 0, price: 0, unit: variant.selling_unit || "unit" };
+    return {
+      mode: "invalid", available: false,
+      reason: "Varian belum diklasifikasikan.",
+      minQty: 0, maxQty: 0, step: 0, price: 0,
+      unit: variant.selling_unit || "unit"
+    };
   }
 
   if (variant.sales_mode === "package") {
-    if (variant.selling_unit === "kg") {
-      return { mode: "invalid", available: false, reason: "Satuan varian kemasan tidak valid.", minQty: 0, step: 0, price: 0, unit: "kg" };
+    if (requestedMode !== "package" || variant.selling_unit === "kg") {
+      return {
+        mode: "invalid", available: false,
+        reason: "Mode atau satuan varian kemasan tidak valid.",
+        minQty: 0, maxQty: 0, step: 0, price: 0, unit: "unit"
+      };
     }
+
     const price = Number(variant.retail_price ?? variant.price);
+    const validPrice = Number.isFinite(price) && price > 0;
+
     return {
-      mode: "package",
-      available: Number.isFinite(price) && price > 0,
-      reason: Number.isFinite(price) && price > 0 ? null : "Harga kemasan belum ditetapkan.",
-      minQty: 1, step: 1, price, unit: "unit"
+      mode: "package", available: validPrice,
+      reason: validPrice ? null : "Harga kemasan belum ditetapkan.",
+      minQty: 1, maxQty: Number.POSITIVE_INFINITY,
+      step: Number(variant.quantity_step ?? 1),
+      price: validPrice ? price : 0, unit: "unit"
     };
   }
 
   if (variant.selling_unit !== "kg") {
-    return { mode: "invalid", available: false, reason: "Satuan varian timbang tidak valid.", minQty: 0, step: 0, price: 0, unit: variant.selling_unit || "unit" };
-  }
-
-  const minRetail = Number(variant.min_retail_kg ?? 0.5);
-  const minB2B = Number(variant.min_b2b_kg ?? 50);
-  const stepRetail = Number(variant.retail_step_kg ?? 0.5);
-  const stepB2B = Number(variant.b2b_step_kg ?? 1);
-  const priceRetail = Number(variant.retail_price ?? variant.price);
-  const priceB2B = variant.b2b_price == null ? null : Number(variant.b2b_price);
-  const useB2B = customerType === "b2b" ||
-    (customerType === "retail" && Number(requestedQty) >= minB2B);
-
-  if (useB2B) {
-    const validPrice = priceB2B !== null && Number.isFinite(priceB2B) && priceB2B > 0;
     return {
-      mode: "b2b", available: validPrice,
-      reason: validPrice ? null : "Harga B2B belum ditetapkan.",
-      minQty: minB2B, step: stepB2B, price: validPrice ? priceB2B : 0, unit: "kg"
+      mode: "invalid", available: false,
+      reason: "Satuan varian timbang tidak valid.",
+      minQty: 0, maxQty: 0, step: 0, price: 0,
+      unit: variant.selling_unit || "unit"
     };
   }
 
-  const validPrice = Number.isFinite(priceRetail) && priceRetail > 0;
+  if (!["retail", "b2b"].includes(requestedMode)) {
+    return {
+      mode: "invalid", available: false,
+      reason: "Pilih mode penjualan retail atau B2B.",
+      minQty: 0, maxQty: 0, step: 0, price: 0, unit: "kg"
+    };
+  }
+
+  const isSauriFresh = brand === "sauri fresh";
+  const configuredRetailMin = Number(variant.min_retail_kg ?? 0.5);
+  const configuredB2BMin = Number(variant.min_b2b_kg ?? 50);
+  const retailStep = Number(variant.retail_step_kg ?? 0.5);
+  const b2bStep = Number(variant.b2b_step_kg ?? 1);
+
+  const minQty = requestedMode === "b2b"
+    ? (isSauriFresh ? Math.max(100, configuredB2BMin) : configuredB2BMin)
+    : (isSauriFresh ? 1 : configuredRetailMin);
+
+  const maxQty = requestedMode === "retail" && isSauriFresh
+    ? 99
+    : Number.POSITIVE_INFINITY;
+
+  const step = requestedMode === "b2b" ? b2bStep : retailStep;
+  const rawPrice = requestedMode === "b2b"
+    ? variant.b2b_price
+    : (variant.retail_price ?? variant.price);
+  const price = rawPrice == null || rawPrice === "" ? NaN : Number(rawPrice);
+  const validPrice = Number.isFinite(price) && price > 0;
+  const validRules = Number.isFinite(minQty) && minQty > 0 &&
+    Number.isFinite(step) && step > 0;
+
   return {
-    mode: "retail", available: validPrice,
-    reason: validPrice ? null : "Harga retail belum ditetapkan.",
-    minQty: minRetail, step: stepRetail, price: validPrice ? priceRetail : 0, unit: "kg"
+    mode: requestedMode,
+    available: validPrice && validRules,
+    reason: !validRules
+      ? "Konfigurasi minimum atau kelipatan quantity tidak valid."
+      : (!validPrice
+        ? (requestedMode === "b2b"
+          ? "Harga B2B belum ditetapkan."
+          : "Harga retail belum ditetapkan.")
+        : null),
+    minQty, maxQty, step,
+    price: validPrice ? price : 0,
+    unit: "kg"
   };
 }
 
-// ============ Helper: normalisasi quantity ============
+// ============ Helper: validasi quantity ============
 function validateQty(rawQty, policy) {
-  if (!policy.available) return policy.reason || "Varian tidak tersedia untuk dibeli.";
-  if (rawQty === undefined || rawQty === null || rawQty === "" || typeof rawQty === "boolean") {
+  if (!policy.available) {
+    return policy.reason || "Varian tidak tersedia untuk dibeli.";
+  }
+
+  if (rawQty === undefined || rawQty === null ||
+      rawQty === "" || typeof rawQty === "boolean") {
     return "Quantity wajib berupa angka positif.";
   }
 
   const qty = Number(rawQty);
-  if (!Number.isFinite(qty) || qty <= 0) return "Quantity wajib berupa angka positif.";
-  if (qty < policy.minQty) return "Minimum pembelian " + policy.minQty + " " + policy.unit + ".";
+  if (!Number.isFinite(qty) || qty <= 0) {
+    return "Quantity wajib berupa angka positif.";
+  }
+
+  if (qty < policy.minQty) {
+    return "Minimum pembelian " + policy.minQty + " " + policy.unit + ".";
+  }
+
+  if (qty > policy.maxQty) {
+    return "Maksimum pembelian " + policy.maxQty + " " + policy.unit + ".";
+  }
+
   if (Math.abs(qty / policy.step - Math.round(qty / policy.step)) > 1e-8) {
     return "Quantity harus mengikuti kelipatan " + policy.step + " " + policy.unit + ".";
   }
-  if (policy.unit !== "kg" && !Number.isInteger(qty)) return "Jumlah kemasan harus bilangan bulat.";
+
+  if (policy.unit !== "kg" && !Number.isInteger(qty)) {
+    return "Jumlah kemasan harus bilangan bulat.";
+  }
+
   return null;
 }
-
 // ============ Helper: cart aktif ============
 async function getOrCreateActiveCart(conn, userId) {
   const [carts] = await conn.execute(
@@ -106,26 +165,33 @@ router.get(
   "/cart",
   asyncRoute(async (req, res) => {
     const userId = Number(req.query.user_id || req.body?.user_id || 9);
+    if (!Number.isSafeInteger(userId) || userId <= 0) {
+      return res.status(400).json({ success: false, message: "user_id tidak valid." });
+    }
 
     const conn = await db.getConnection();
     try {
       const cartId = await getOrCreateActiveCart(conn, userId);
-      const customerType = await getUserCustomerType(conn, userId);
 
       const [items] = await conn.execute(
         `SELECT
-          ci.id, ci.quantity, ci.variant_id,
+          ci.id, ci.quantity, ci.variant_id, ci.selling_mode,
           pv.variant_name, pv.sku, pv.price,
           pv.sales_mode, pv.selling_unit, pv.quantity_step, pv.weight_grams,
           pv.retail_price, pv.b2b_price,
           pv.min_retail_kg, pv.min_b2b_kg,
           pv.retail_step_kg, pv.b2b_step_kg,
           p.id AS product_id, p.public_id AS product_public_id,
-          p.name AS product_name, p.business_id,
+          p.name AS product_name, p.brand AS product_brand, p.business_id,
           b.business_name,
-          (SELECT image_url FROM product_images
-           WHERE product_id = p.id AND is_primary = 1 LIMIT 1) AS image_url,
-          COALESCE(inv.quantity_on_hand, 0) - COALESCE(inv.quantity_reserved, 0) AS available_stock
+          (SELECT pi.image_url
+           FROM product_images pi
+           WHERE pi.product_id = p.id AND pi.is_primary = 1
+           LIMIT 1) AS image_url,
+          GREATEST(
+            COALESCE(inv.quantity_on_hand, 0) -
+            COALESCE(inv.quantity_reserved, 0), 0
+          ) AS available_stock
         FROM cart_items ci
         JOIN product_variants pv ON pv.id = ci.variant_id
         JOIN products p ON p.id = pv.product_id
@@ -137,30 +203,41 @@ router.get(
       );
 
       const mapped = items.map((it) => {
-        const policy = resolvePolicy(it, customerType, Number(it.quantity));
+        const qty = Number(it.quantity);
+        const stock = Number(it.available_stock);
+        const policy = resolvePolicy(it, it.selling_mode);
+        const stockValid = Number.isFinite(stock) && stock >= 0;
+        const stockEnough = stockValid && qty <= stock;
+        const canPurchase = Boolean(policy.available) && stockEnough;
+
         return {
           id: it.id,
           variant_id: it.variant_id,
           product_id: it.product_id,
           product_public_id: it.product_public_id,
           product_name: it.product_name,
+          product_brand: it.product_brand,
           variant_name: it.variant_name,
           sku: it.sku,
           business_id: it.business_id,
           business_name: it.business_name,
           image_url: it.image_url,
+          selling_mode: it.selling_mode,
+          mode: policy.mode,
           price: policy.price,
           selling_unit: policy.unit,
           quantity_step: policy.step,
           min_qty: policy.minQty,
-          mode: policy.mode,
-          can_purchase: Boolean(policy.available),
-          availability_reason: policy.reason || null,
+          can_purchase: canPurchase,
+          availability_reason: !policy.available
+            ? (policy.reason || "Mode penjualan tidak tersedia.")
+            : (!stockEnough
+              ? `Stok tidak cukup. Tersedia: ${stockValid ? stock : 0} ${policy.unit}.`
+              : null),
           weight_grams: it.weight_grams != null ? Number(it.weight_grams) : null,
-          quantity: Number(it.quantity),
-          available_stock: Number(it.available_stock),
-          line_total:
-            Math.round(policy.price * Number(it.quantity) * 100) / 100,
+          quantity: qty,
+          available_stock: stockValid ? stock : 0,
+          line_total: Math.round(policy.price * qty * 100) / 100
         };
       });
 
@@ -170,28 +247,23 @@ router.get(
         success: true,
         data: {
           cart_id: cartId,
-          customer_type: customerType,
           currency: "IDR",
           items: mapped,
           items_count: mapped.length,
           subtotal: Math.round(subtotal * 100) / 100,
-        },
+          can_checkout: mapped.length > 0 && mapped.every((it) => it.can_purchase)
+        }
       });
     } finally {
       conn.release();
     }
   })
 );
-
-// ============================================================
-// POST /api/v1/cart/items
-// Body: { variant_id, quantity, user_id? }
-// ============================================================
 router.post(
   "/cart/items",
   asyncRoute(async (req, res) => {
     const userId = Number(req.body?.user_id || 9);
-    const { variant_id, quantity } = req.body || {};
+    const { variant_id, quantity, selling_mode } = req.body || {};
 
     if (!variant_id) {
       return res.status(400).json({
@@ -200,51 +272,127 @@ router.post(
       });
     }
 
+    if (!["retail", "b2b", "package"].includes(selling_mode)) {
+      return res.status(400).json({
+        success: false,
+        message: "selling_mode wajib berupa retail, b2b, atau package.",
+      });
+    }
+
     const conn = await db.getConnection();
     try {
       const [variants] = await conn.execute(
-        `SELECT id, product_id, sales_mode, selling_unit, quantity_step, price,
-                retail_price, b2b_price,
-                min_retail_kg, min_b2b_kg,
-                retail_step_kg, b2b_step_kg
-         FROM product_variants
-         WHERE id = ? AND is_active = 1`,
+        `SELECT pv.id, pv.product_id, pv.sales_mode, pv.selling_unit,
+                pv.quantity_step, pv.price, pv.retail_price, pv.b2b_price,
+                pv.min_retail_kg, pv.min_b2b_kg,
+                pv.retail_step_kg, pv.b2b_step_kg,
+                p.brand AS product_brand
+         FROM product_variants pv
+         JOIN products p ON p.id = pv.product_id
+         WHERE pv.id = ? AND pv.is_active = 1
+         LIMIT 1`,
         [variant_id]
       );
-      if (variants.length === 0) {
+
+      if (!variants.length) {
         return res.status(404).json({
           success: false,
           message: "Variant tidak ditemukan atau tidak aktif.",
         });
       }
+
       const variant = variants[0];
-      const customerType = await getUserCustomerType(conn, userId);
-
-      const policy = resolvePolicy(variant, customerType, quantity);
+      const policy = resolvePolicy(variant, selling_mode);
       const qtyError = validateQty(quantity, policy);
-      if (qtyError) return res.status(400).json({ success: false, message: qtyError });
-      const qty = Number(quantity);
 
+      if (qtyError) {
+        return res.status(400).json({
+          success: false,
+          message: qtyError,
+        });
+      }
+
+      const qty = Number(quantity);
       const cartId = await getOrCreateActiveCart(conn, userId);
 
+      const [existingItems] = await conn.execute(
+        `SELECT quantity
+         FROM cart_items
+         WHERE cart_id = ? AND variant_id = ? AND selling_mode = ?
+         LIMIT 1`,
+        [cartId, variant_id, selling_mode]
+      );
+
+      const existingQty = existingItems.length
+        ? Number(existingItems[0].quantity)
+        : 0;
+      const combinedQty = existingQty + qty;
+      const combinedError = validateQty(combinedQty, policy);
+
+      if (combinedError) {
+        return res.status(400).json({
+          success: false,
+          message: `Jumlah akhir di keranjang tidak valid: ${combinedError}`,
+        });
+      }
+
+      // Validasi stok sebelum menambahkan item ke cart.
+      const [inventoryRows] = await conn.execute(
+        `SELECT
+           GREATEST(
+             COALESCE(quantity_on_hand, 0) -
+             COALESCE(quantity_reserved, 0), 0
+           ) AS available_stock
+         FROM inventory
+         WHERE variant_id = ?
+         LIMIT 1`,
+        [variant_id]
+      );
+
+      const availableStock = inventoryRows.length
+        ? Number(inventoryRows[0].available_stock)
+        : 0;
+
+      if (!Number.isFinite(availableStock) || availableStock < combinedQty) {
+        return res.status(400).json({
+          success: false,
+          message: `Stok tidak cukup. Tersedia: ${
+            Number.isFinite(availableStock) && availableStock >= 0
+              ? availableStock
+              : 0
+          } ${policy.unit}.`,
+          data: {
+            variant_id,
+            selling_mode: policy.mode,
+            requested_cart_quantity: combinedQty,
+            available_stock:
+              Number.isFinite(availableStock) && availableStock >= 0
+                ? availableStock
+                : 0
+          }
+        });
+      }
+
       await conn.execute(
-        `INSERT INTO cart_items (cart_id, variant_id, quantity)
-         VALUES (?, ?, ?)
+        `INSERT INTO cart_items
+           (cart_id, variant_id, selling_mode, quantity)
+         VALUES (?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
            quantity = quantity + VALUES(quantity),
            updated_at = NOW()`,
-        [cartId, variant_id, qty]
+        [cartId, variant_id, selling_mode, qty]
       );
 
-      res.status(201).json({
+      return res.status(201).json({
         success: true,
         message: "Item ditambahkan ke cart.",
         data: {
           cart_id: cartId,
-          variant_id: variant_id,
+          variant_id,
           added_quantity: qty,
+          cart_quantity: combinedQty,
+          selling_mode: policy.mode,
           selling_unit: policy.unit,
-          mode: policy.mode,
           applied_price: policy.price,
           min_qty: policy.minQty,
           step: policy.step,
@@ -254,9 +402,7 @@ router.post(
       conn.release();
     }
   })
-);
-
-// ============================================================
+);// ============================================================
 // PATCH /api/v1/cart/items/:id
 // ============================================================
 router.patch(
@@ -266,56 +412,92 @@ router.patch(
     const itemId = Number(req.params.id);
     const { quantity } = req.body || {};
 
+    if (!Number.isSafeInteger(userId) || userId <= 0 ||
+        !Number.isSafeInteger(itemId) || itemId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "user_id atau ID item tidak valid."
+      });
+    }
+
     const conn = await db.getConnection();
     try {
       const [rows] = await conn.execute(
-        `SELECT ci.id, pv.sales_mode, pv.selling_unit, pv.quantity_step, pv.price,
-                pv.retail_price, pv.b2b_price,
-                pv.min_retail_kg, pv.min_b2b_kg,
-                pv.retail_step_kg, pv.b2b_step_kg
+        `SELECT
+          ci.id, ci.quantity AS old_quantity, ci.selling_mode,
+          pv.id AS variant_id, pv.sales_mode, pv.selling_unit,
+          pv.quantity_step, pv.price, pv.retail_price, pv.b2b_price,
+          pv.min_retail_kg, pv.min_b2b_kg,
+          pv.retail_step_kg, pv.b2b_step_kg,
+          p.name AS product_name, p.brand AS product_brand,
+          GREATEST(
+            COALESCE(inv.quantity_on_hand, 0) -
+            COALESCE(inv.quantity_reserved, 0), 0
+          ) AS available_stock
          FROM cart_items ci
          JOIN carts c ON c.id = ci.cart_id
          JOIN product_variants pv ON pv.id = ci.variant_id
-         WHERE ci.id = ? AND c.user_id = ? AND c.status = 'active'`,
+         JOIN products p ON p.id = pv.product_id
+         LEFT JOIN inventory inv ON inv.variant_id = pv.id
+         WHERE ci.id = ? AND c.user_id = ? AND c.status = 'active'
+         LIMIT 1`,
         [itemId, userId]
       );
+
       if (rows.length === 0) {
         return res.status(404).json({
           success: false,
-          message: "Item tidak ditemukan di cart Anda.",
+          message: "Item tidak ditemukan di cart Anda."
         });
       }
 
-      const customerType = await getUserCustomerType(conn, userId);
-      const policy = resolvePolicy(rows[0], customerType, quantity);
+      const item = rows[0];
+      const policy = resolvePolicy(item, item.selling_mode);
       const qtyError = validateQty(quantity, policy);
-      if (qtyError) return res.status(400).json({ success: false, message: qtyError });
+
+      if (qtyError) {
+        return res.status(400).json({ success: false, message: qtyError });
+      }
+
       const qty = Number(quantity);
+      const stock = Number(item.available_stock);
+
+      if (!Number.isFinite(stock) || stock < 0 || qty > stock) {
+        return res.status(400).json({
+          success: false,
+          message: `Stok "${item.product_name}" tidak cukup. Tersedia: ${
+            Number.isFinite(stock) && stock >= 0 ? stock : 0
+          } ${policy.unit}.`
+        });
+      }
 
       await conn.execute(
-        `UPDATE cart_items SET quantity = ?, updated_at = NOW() WHERE id = ?`,
+        `UPDATE cart_items
+         SET quantity = ?, updated_at = NOW()
+         WHERE id = ?`,
         [qty, itemId]
       );
 
-      res.json({
+      return res.json({
         success: true,
         message: "Quantity diupdate.",
         data: {
           id: itemId,
+          variant_id: item.variant_id,
           quantity: qty,
+          selling_mode: item.selling_mode,
           selling_unit: policy.unit,
           mode: policy.mode,
-        },
+          price: policy.price,
+          available_stock: stock,
+          line_total: Math.round(policy.price * qty * 100) / 100
+        }
       });
     } finally {
       conn.release();
     }
   })
 );
-
-// ============================================================
-// DELETE /api/v1/cart/items/:id
-// ============================================================
 router.delete(
   "/cart/items/:id",
   asyncRoute(async (req, res) => {
@@ -360,3 +542,5 @@ router.delete(
 );
 
 module.exports = router;
+
+

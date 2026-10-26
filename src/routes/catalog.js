@@ -1,7 +1,24 @@
 const express = require("express");
+const multer = require("multer");
 const db = require("../db");
+const requireAuth = require("../middleware/require-auth");
+const { uploadToCloudinary } = require("../cloudinary");
 
 const router = express.Router();
+
+// Multer memory storage untuk Cloudinary
+const productImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  fileFilter: (_req, file, cb) => {
+    const allowed = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
+    if (allowed.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Format tidak didukung. Gunakan JPG/PNG/WebP."));
+    }
+  },
+});
 
 function asyncRoute(handler) {
   return (req, res, next) =>
@@ -14,7 +31,9 @@ function positiveInt(value, fallback, max) {
   return Math.min(number, max);
 }
 
+// ============================================================
 // GET /api/v1/categories
+// ============================================================
 router.get("/categories", asyncRoute(async (req, res) => {
   const [rows] = await db.execute(`
     SELECT id, parent_id, name, slug, description, image_url, sort_order
@@ -26,7 +45,9 @@ router.get("/categories", asyncRoute(async (req, res) => {
   res.json({ success: true, data: rows });
 }));
 
-// GET /api/v1/products?q=...&category=...&page=1&limit=20
+// ============================================================
+// GET /api/v1/products
+// ============================================================
 router.get("/products", asyncRoute(async (req, res) => {
   const page = positiveInt(req.query.page, 1, 1000000);
   const limit = positiveInt(req.query.limit, 100, 1000);
@@ -49,13 +70,11 @@ router.get("/products", asyncRoute(async (req, res) => {
     params.push(req.query.category.trim());
   }
 
-  // Filter by business slug
   if (typeof req.query.business === "string" && req.query.business.trim()) {
     conditions.push("b.slug = ?");
     params.push(req.query.business.trim());
   }
 
-  // Filter by business_id (numeric)
   if (req.query.business_id) {
     const bid = Number.parseInt(req.query.business_id, 10);
     if (Number.isSafeInteger(bid) && bid > 0) {
@@ -103,6 +122,8 @@ router.get("/products", asyncRoute(async (req, res) => {
       variants.min_b2b_price,
       variants.max_b2b_price,
       variants.min_b2b_kg,
+      variants.selling_unit,
+      variants.sales_mode,
       (
         SELECT pi.image_url
         FROM product_images pi
@@ -123,6 +144,8 @@ router.get("/products", asyncRoute(async (req, res) => {
         MIN(pv.b2b_price) AS min_b2b_price,
         MAX(pv.b2b_price) AS max_b2b_price,
         MIN(pv.min_b2b_kg) AS min_b2b_kg,
+        MAX(pv.selling_unit) AS selling_unit,
+        MAX(pv.sales_mode) AS sales_mode,
         SUM(
           GREATEST(
             COALESCE(i.quantity_on_hand, 0) -
@@ -154,7 +177,9 @@ router.get("/products", asyncRoute(async (req, res) => {
   });
 }));
 
+// ============================================================
 // GET /api/v1/products/:slug
+// ============================================================
 router.get("/products/:slug", asyncRoute(async (req, res) => {
   const [products] = await db.execute(`
     SELECT
@@ -238,68 +263,39 @@ router.get("/products/:slug", asyncRoute(async (req, res) => {
   });
 }));
 
-
-// POST /api/v1/products
-// Tambah produk baru untuk tenant
+// ============================================================
+// POST /api/v1/products — Tambah produk baru
+// ============================================================
 router.post("/products", asyncRoute(async (req, res) => {
-  const businessId = 1; // Sementara hardcode — nanti pakai auth
+  const businessId = 1;
 
-  const {
-    name,
-    price,
-    stock,
-    description,
-    category_slug,
-    sku,
-  } = req.body || {};
+  const { name, price, stock, description, category_slug, sku } = req.body || {};
 
-  // Validasi
   if (!name || typeof name !== "string" || !name.trim()) {
-    return res.status(400).json({
-      success: false,
-      message: "Nama produk wajib diisi.",
-    });
+    return res.status(400).json({ success: false, message: "Nama produk wajib diisi." });
   }
 
   const priceNum = Number(price);
   if (!Number.isFinite(priceNum) || priceNum <= 0) {
-    return res.status(400).json({
-      success: false,
-      message: "Harga produk tidak valid.",
-    });
+    return res.status(400).json({ success: false, message: "Harga produk tidak valid." });
   }
 
   const stockNum = Number(stock);
   if (!Number.isFinite(stockNum) || stockNum < 0) {
-    return res.status(400).json({
-      success: false,
-      message: "Stok produk tidak valid.",
-    });
+    return res.status(400).json({ success: false, message: "Stok produk tidak valid." });
   }
 
-  // Generate slug unik
-  const slugBase = name
-    .toLowerCase()
-    .trim()
-    .replace(/[^\w\s-]/g, "")
-    .replace(/[\s_-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-
+  const slugBase = name.toLowerCase().trim()
+    .replace(/[^\w\s-]/g, "").replace(/[\s_-]+/g, "-").replace(/^-+|-+$/g, "");
   const slug = `sauri-${slugBase}-${Date.now()}`;
 
-  // Cari category_id dari slug
   let categoryId = null;
   if (category_slug) {
-    const [cats] = await db.execute(
-      "SELECT id FROM categories WHERE slug = ? LIMIT 1",
-      [category_slug]
-    );
+    const [cats] = await db.execute("SELECT id FROM categories WHERE slug = ? LIMIT 1", [category_slug]);
     if (cats.length > 0) categoryId = cats[0].id;
   }
   if (!categoryId) {
-    const [defaultCat] = await db.execute(
-      "SELECT id FROM categories WHERE slug = 'daging-unggas' LIMIT 1"
-    );
+    const [defaultCat] = await db.execute("SELECT id FROM categories WHERE slug = 'daging-unggas' LIMIT 1");
     categoryId = defaultCat.length > 0 ? defaultCat[0].id : 1;
   }
 
@@ -307,22 +303,16 @@ router.post("/products", asyncRoute(async (req, res) => {
   const publicId = crypto.randomUUID();
 
   try {
-    // Insert product
     const [productResult] = await db.execute(
       `INSERT INTO products (
         public_id, business_id, category_id, name, slug, sku,
         short_description, product_type, condition_type, status,
         weight_grams, requires_shipping, published_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'physical', 'new', 'active', 1000, 1, NOW())`,
-      [
-        publicId, businessId, categoryId, name.trim(), slug,
-        sku || null, description || null,
-      ]
+      [publicId, businessId, categoryId, name.trim(), slug, sku || null, description || null]
     );
 
     const productId = productResult.insertId;
-
-    // Insert default variant
     const variantSku = sku || `SAURI-${productId}-DEFAULT`;
     const [variantResult] = await db.execute(
       `INSERT INTO product_variants (
@@ -332,16 +322,12 @@ router.post("/products", asyncRoute(async (req, res) => {
       [productId, variantSku, priceNum]
     );
 
-    // Insert inventory
     try {
       await db.execute(
-        `INSERT INTO inventory (variant_id, quantity_on_hand, quantity_reserved)
-         VALUES (?, ?, 0)`,
+        `INSERT INTO inventory (variant_id, quantity_on_hand, quantity_reserved) VALUES (?, ?, 0)`,
         [variantResult.insertId, stockNum]
       );
-    } catch (invErr) {
-      // Skip kalau tabel inventory beda struktur
-    }
+    } catch (invErr) {}
 
     res.status(201).json({
       success: true,
@@ -357,15 +343,68 @@ router.post("/products", asyncRoute(async (req, res) => {
     });
   } catch (err) {
     if (err.code === "ER_DUP_ENTRY") {
-      return res.status(409).json({
-        success: false,
-        message: "Produk dengan SKU tersebut sudah ada.",
-      });
+      return res.status(409).json({ success: false, message: "Produk dengan SKU tersebut sudah ada." });
     }
     throw err;
   }
 }));
 
+// ============================================================
+// POST /products/:publicId/images — Upload gambar produk (Cloudinary)
+// ============================================================
+router.post(
+  "/products/:publicId/images",
+  requireAuth,
+  productImageUpload.single("image"),
+  asyncRoute(async (req, res) => {
+    const { publicId } = req.params;
+
+    const [products] = await db.execute(
+      "SELECT id FROM products WHERE public_id = ? LIMIT 1",
+      [publicId]
+    );
+
+    if (products.length === 0) {
+      return res.status(404).json({ success: false, message: "Produk tidak ditemukan." });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: "File gambar wajib diunggah." });
+    }
+
+    const productId = products[0].id;
+
+    const result = await uploadToCloudinary(
+      req.file.buffer,
+      `nusadhipa/products/${productId}`
+    );
+
+    const [existing] = await db.execute(
+      "SELECT COUNT(*) AS total FROM product_images WHERE product_id = ?",
+      [productId]
+    );
+    const isPrimary = existing[0].total === 0 ? 1 : 0;
+
+    const [insertResult] = await db.execute(
+      `INSERT INTO product_images 
+        (product_id, image_url, is_primary, sort_order, created_at)
+       VALUES (?, ?, ?, 0, NOW())`,
+      [productId, result.url, isPrimary]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: "Gambar berhasil diunggah.",
+      data: {
+        id: insertResult.insertId,
+        product_id: productId,
+        image_url: result.url,
+        is_primary: isPrimary,
+        sort_order: 0,
+      },
+    });
+  })
+);
 
 // ============================================================
 // PUT /api/v1/products/:publicId — Update produk
@@ -374,48 +413,33 @@ router.put("/products/:publicId", asyncRoute(async (req, res) => {
   const publicId = req.params.publicId;
   const { name, price, stock, description, category_slug } = req.body || {};
 
-  // Cari product
   const [products] = await db.execute(
     "SELECT id FROM products WHERE public_id = ? LIMIT 1",
     [publicId]
   );
   if (products.length === 0) {
-    return res.status(404).json({
-      success: false,
-      message: "Produk tidak ditemukan.",
-    });
+    return res.status(404).json({ success: false, message: "Produk tidak ditemukan." });
   }
   const productId = products[0].id;
 
-  // Validasi
   if (name !== undefined) {
     if (typeof name !== "string" || !name.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: "Nama produk tidak valid.",
-      });
+      return res.status(400).json({ success: false, message: "Nama produk tidak valid." });
     }
   }
   if (price !== undefined) {
     const priceNum = Number(price);
     if (!Number.isFinite(priceNum) || priceNum <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Harga tidak valid.",
-      });
+      return res.status(400).json({ success: false, message: "Harga tidak valid." });
     }
   }
   if (stock !== undefined) {
     const stockNum = Number(stock);
     if (!Number.isFinite(stockNum) || stockNum < 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Stok tidak valid.",
-      });
+      return res.status(400).json({ success: false, message: "Stok tidak valid." });
     }
   }
 
-  // Update produk
   const updates = [];
   const params = [];
 
@@ -446,7 +470,6 @@ router.put("/products/:publicId", asyncRoute(async (req, res) => {
     );
   }
 
-  // Update variant (harga)
   if (price !== undefined) {
     const priceNum = Number(price);
     await db.execute(
@@ -456,7 +479,6 @@ router.put("/products/:publicId", asyncRoute(async (req, res) => {
     );
   }
 
-  // Update stock (inventory)
   if (stock !== undefined) {
     const stockNum = Number(stock);
     const [variants] = await db.execute(
@@ -500,25 +522,17 @@ router.delete("/products/:publicId", asyncRoute(async (req, res) => {
     [publicId]
   );
   if (products.length === 0) {
-    return res.status(404).json({
-      success: false,
-      message: "Produk tidak ditemukan.",
-    });
+    return res.status(404).json({ success: false, message: "Produk tidak ditemukan." });
   }
   const productId = products[0].id;
 
-  // Soft delete: set status = archived
   await db.execute(
     "UPDATE products SET status = 'archived', updated_at = NOW() WHERE id = ?",
     [productId]
   );
 
-  res.json({
-    success: true,
-    message: "Produk berhasil dihapus.",
-  });
+  res.json({ success: true, message: "Produk berhasil dihapus." });
 }));
-
 
 // ============================================================
 // GET /api/v1/businesses/:slug — Public business detail
@@ -537,7 +551,7 @@ router.get("/businesses/:slug", asyncRoute(async (req, res) => {
       b.id, b.public_id, b.business_name, b.legal_name, b.slug,
       b.business_type, b.description, b.logo_url, b.banner_url,
       b.email, b.phone, b.province, b.city, b.address,
-      b.nib, b.tax_number, b.kbli_code, b.kbli_name,
+      b.nib, b.kbli_code, b.kbli_name,
       b.verification_status, b.status,
       (SELECT COUNT(*) FROM products p 
        WHERE p.business_id = b.id AND p.status = 'active') AS product_count
@@ -570,7 +584,6 @@ router.get("/businesses/:slug", asyncRoute(async (req, res) => {
   });
 }));
 
-
 // ============================================================
 // GET /api/v1/businesses — Public list semua business aktif
 // ============================================================
@@ -589,10 +602,7 @@ router.get("/businesses", asyncRoute(async (req, res) => {
     ORDER BY b.business_name ASC
   `);
 
-  res.json({
-    success: true,
-    data: rows
-  });
+  res.json({ success: true, data: rows });
 }));
 
 module.exports = router;
