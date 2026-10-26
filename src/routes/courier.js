@@ -1,273 +1,1045 @@
+const requireRole = require("../middleware/require-role");
+const requireAuth = require("../middleware/require-auth");
+
 const express = require("express");
 const router = express.Router();
 const db = require("../db");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const requireCourierAuth = require("../middleware/require-courier-auth");
+
+const VALID_COURIER_STATUSES = ["approved", "rejected", "suspended"];
+const VALID_PAYOUT_METHODS = ["bank_transfer", "ewallet"];
+const PARTNERSHIP_TYPE = "freelance";
+
+const PROFILE_FIELDS = {
+  phone: { max: 30 },
+  vehicle_type: { max: 50 },
+  plate_number: { max: 20 },
+  city: { max: 100 },
+  payout_account: { max: 100 },
+};
+
+function sendError(res, err, message) {
+  console.error(`[COURIER] ${message}:`, err);
+  return res.status(500).json({
+    success: false,
+    message: "Terjadi kesalahan pada layanan kurir.",
+  });
+}
+
+function parseId(value) {
+  const id = Number(value);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+function parseMoney(value) {
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount >= 0 ? amount : 0;
+}
+
+function cleanProfileField(value, maxLength) {
+  if (value === undefined) return undefined;
+  if (value === null || value === "") return null;
+  if (typeof value !== "string") return undefined;
+
+  const cleaned = value.trim();
+  if (!cleaned) return null;
+  if (cleaned.length > maxLength) return undefined;
+
+  return cleaned;
+}
+
+function publicCourier(courier) {
+  return {
+    id: courier.id,
+    public_id: courier.public_id,
+    name: courier.name,
+    email: courier.email,
+    phone: courier.phone,
+    vehicle_type: courier.vehicle_type,
+    partnership_type: courier.partnership_type || PARTNERSHIP_TYPE,
+    plate_number: courier.plate_number,
+    city: courier.city,
+    payout_method: courier.payout_method,
+    payout_account: courier.payout_account,
+    status: courier.status,
+    created_at: courier.created_at,
+  };
+}
+
+function validEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function validPayoutMethod(method) {
+  return VALID_PAYOUT_METHODS.includes(method);
+}
+
+const COURIER_SELECT = `
+  id, public_id, name, email, phone,
+  vehicle_type,
+  COALESCE(partnership_type, 'freelance') AS partnership_type,
+  plate_number, city, payout_method, payout_account,
+  status, created_at
+`;
 
 // ============================================================
-// ROUTES (Generate dari Orders Nyata)
+// COURIER PROFILE
 // ============================================================
-router.get("/routes", async (req, res) => {
+
+router.get("/profile", requireCourierAuth, async (req, res) => {
   try {
-    const [orders] = await db.execute(`
-      SELECT o.id, o.order_number, o.shipping_address, o.shipping_lat, o.shipping_lng,
-             o.shipping_distance_km, o.shipping_total, o.status
-      FROM orders o
-      WHERE o.status IN ('paid', 'processing')
-        AND NOT EXISTS (
-          SELECT 1 FROM courier_routes cr 
-          WHERE JSON_CONTAINS(cr.order_ids, CAST(o.id AS JSON))
-        )
-      ORDER BY o.created_at ASC
-    `);
+    const [rows] = await db.execute(
+      `SELECT ${COURIER_SELECT}
+       FROM couriers
+       WHERE id = ?
+       LIMIT 1`,
+      [req.courier.id]
+    );
 
-    if (orders.length === 0) return res.json({ success: true, data: [] });
-
-    const grouped = new Map();
-    for (const order of orders) {
-      const distance = parseFloat(order.shipping_distance_km) || 0;
-      const category = distance <= 5 ? "Dekat" : "Jauh";
-      if (!grouped.has(category)) grouped.set(category, []);
-      grouped.get(category).push(order);
-    }
-
-    const routes = [];
-    let code = 65;
-    for (const [category, areaOrders] of grouped) {
-      const routeCode = String.fromCharCode(code++);
-      const isDekat = category === "Dekat";
-      const feePerOrder = isDekat ? 5000 : 7000;
-      const baseFee = isDekat ? 10000 : 20000;
-      const totalDistance = areaOrders.reduce((sum, o) => sum + (parseFloat(o.shipping_distance_km) || 0), 0);
-      const totalWeight = areaOrders.reduce((sum, o) => sum + (parseFloat(o.shipping_distance_km) || 1), 0);
-      const fee = baseFee + (areaOrders.length * feePerOrder) + Math.round(totalDistance * 500);
-
-      const [result] = await db.execute(
-        "INSERT INTO courier_routes (route_code, area, order_ids, customers, weight_kg, fee, status) VALUES (?, ?, ?, ?, ?, ?, 'available')",
-        [routeCode, category, JSON.stringify(areaOrders.map(o => o.id)), areaOrders.length, totalWeight.toFixed(2), fee]
-      );
-
-      routes.push({
-        id: result.insertId, route_code: routeCode, area: category,
-        customers: areaOrders.length, weight_kg: totalWeight.toFixed(2), fee, status: "available",
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Profil kurir tidak ditemukan.",
       });
     }
 
-    res.json({ success: true, data: routes });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-});
-
-// ============================================================
-// CLAIM (Klaim Rute)
-// ============================================================
-router.post("/routes/:id/claim", async (req, res) => {
-  const { id } = req.params;
-  const { courier_id } = req.body;
-  if (!courier_id) return res.status(400).json({ success: false, message: "courier_id wajib diisi" });
-  try {
-    const [result] = await db.execute(
-      "UPDATE courier_routes SET status = 'taken', courier_id = ?, claimed_at = NOW() WHERE id = ? AND status = 'available'",
-      [courier_id, id]
-    );
-    if (result.affectedRows === 0) return res.status(409).json({ success: false, message: "Rute sudah diambil kurir lain" });
-    await db.execute("INSERT INTO courier_claims (route_id, courier_id) VALUES (?, ?)", [id, courier_id]);
-    res.json({ success: true, message: "Rute berhasil diambil" });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-});
-
-// ============================================================
-// MY ROUTES (Rute Aktif)
-// ============================================================
-router.get("/routes/mine", async (req, res) => {
-  const { courier_id } = req.query;
-  if (!courier_id) return res.status(400).json({ success: false, message: "courier_id wajib diisi" });
-  try {
-    const [rows] = await db.execute(
-      "SELECT id, route_code, area, customers, weight_kg, fee, status, claimed_at FROM courier_routes WHERE courier_id = ? AND status IN ('taken','completed') ORDER BY claimed_at DESC",
-      [courier_id]
-    );
-    res.json({ success: true, data: rows });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-});
-
-// ============================================================
-// COMPLETE (Selesaikan Rute)
-// ============================================================
-router.post("/routes/:id/complete", async (req, res) => {
-  const { id } = req.params;
-  const { courier_id } = req.body;
-  if (!courier_id) return res.status(400).json({ success: false, message: "courier_id wajib diisi" });
-  try {
-    const [rows] = await db.execute("SELECT fee FROM courier_routes WHERE id = ? AND courier_id = ? AND status = 'taken'", [id, courier_id]);
-    if (rows.length === 0) return res.status(404).json({ success: false, message: "Rute tidak ditemukan / bukan milik Anda" });
-    const fee = rows[0].fee;
-    await db.execute("UPDATE courier_routes SET status = 'completed', completed_at = NOW() WHERE id = ?", [id]);
-    await db.execute("INSERT INTO courier_earnings (courier_id, route_id, amount, status) VALUES (?, ?, ?, 'available')", [courier_id, id, fee]);
-    res.json({ success: true, message: "Rute selesai. Fee masuk ke saldo." });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-});
-
-// ============================================================
-// EARNINGS (Riwayat Pendapatan)
-// ============================================================
-router.get("/earnings", async (req, res) => {
-  const { courier_id } = req.query;
-  if (!courier_id) return res.status(400).json({ success: false, message: "courier_id wajib diisi" });
-  try {
-    const [rows] = await db.execute(
-      "SELECT e.id, e.route_id, e.amount, e.status, e.created_at, e.paid_at, r.route_code, r.area FROM courier_earnings e LEFT JOIN courier_routes r ON e.route_id = r.id WHERE e.courier_id = ? ORDER BY e.created_at DESC",
-      [courier_id]
-    );
-    const [summary] = await db.execute(
-      "SELECT COALESCE(SUM(CASE WHEN status='available' THEN amount ELSE 0 END),0) AS available_balance, COALESCE(SUM(CASE WHEN status='pending' THEN amount ELSE 0 END),0) AS pending_balance, COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0) AS total_paid FROM courier_earnings WHERE courier_id = ?",
-      [courier_id]
-    );
-    res.json({ success: true, data: rows, summary: summary[0] });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-});
-
-// ============================================================
-// DELIVERIES (Riwayat Rute Selesai)
-// ============================================================
-router.get("/deliveries", async (req, res) => {
-  const { courier_id } = req.query;
-  if (!courier_id) return res.status(400).json({ success: false, message: "courier_id wajib diisi" });
-  try {
-    const [rows] = await db.execute(
-      "SELECT id, route_code, area, customers, weight_kg, fee, status, claimed_at, completed_at FROM courier_routes WHERE courier_id = ? AND status = 'completed' ORDER BY completed_at DESC",
-      [courier_id]
-    );
-    res.json({ success: true, data: rows });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-});
-
-// ============================================================
-// PAYOUTS (Ajukan & Riwayat Pencairan)
-// ============================================================
-router.post("/payouts", async (req, res) => {
-  const { courier_id, method, account_number } = req.body;
-  if (!courier_id || !method || !account_number) {
-    return res.status(400).json({ success: false, message: "Data pencairan tidak lengkap" });
+    return res.json({
+      success: true,
+      data: publicCourier(rows[0]),
+    });
+  } catch (err) {
+    return sendError(res, err, "Gagal mengambil profil");
   }
-  try {
-    const [summary] = await db.execute(
-      "SELECT COALESCE(SUM(amount), 0) AS available_balance FROM courier_earnings WHERE courier_id = ? AND status = 'available'",
-      [courier_id]
-    );
-    const amount = Number(summary[0].available_balance);
-    if (amount <= 0) return res.status(400).json({ success: false, message: "Saldo tidak mencukupi" });
+});
 
-    const [result] = await db.execute(
-      "INSERT INTO courier_payouts (courier_id, amount, method, account_number) VALUES (?, ?, ?, ?)",
-      [courier_id, amount, method, account_number]
+router.put("/profile", requireCourierAuth, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const updates = [];
+    const values = [];
+
+    for (const [field, config] of Object.entries(PROFILE_FIELDS)) {
+      if (body[field] === undefined) continue;
+
+      const value = cleanProfileField(body[field], config.max);
+
+      if (value === undefined) {
+        return res.status(400).json({
+          success: false,
+          message: `Field ${field} tidak valid atau terlalu panjang.`,
+        });
+      }
+
+      updates.push(`${field} = ?`);
+      values.push(value);
+    }
+
+    if (body.payout_method !== undefined) {
+      const method =
+        body.payout_method === null || body.payout_method === ""
+          ? null
+          : body.payout_method;
+
+      if (method !== null && !validPayoutMethod(method)) {
+        return res.status(400).json({
+          success: false,
+          message: "Metode pencairan harus bank_transfer atau ewallet.",
+        });
+      }
+
+      updates.push("payout_method = ?");
+      values.push(method);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Tidak ada data profil yang dikirim untuk diperbarui.",
+      });
+    }
+
+    const [currentRows] = await db.execute(
+      `SELECT payout_method, payout_account
+       FROM couriers
+       WHERE id = ?
+       LIMIT 1`,
+      [req.courier.id]
     );
+
+    if (!currentRows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Profil kurir tidak ditemukan.",
+      });
+    }
+
+    const current = currentRows[0];
+
+    const nextMethod =
+      body.payout_method !== undefined
+        ? body.payout_method || null
+        : current.payout_method;
+
+    const nextAccount =
+      body.payout_account !== undefined
+        ? cleanProfileField(body.payout_account, 100)
+        : current.payout_account;
+
+    if (nextAccount === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: "Nomor rekening atau akun pencairan tidak valid.",
+      });
+    }
+
+    if (Boolean(nextMethod) !== Boolean(nextAccount)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Metode dan rekening pencairan harus diisi bersama atau dikosongkan bersama.",
+      });
+    }
+
+    if (nextMethod && !validPayoutMethod(nextMethod)) {
+      return res.status(400).json({
+        success: false,
+        message: "Metode pencairan tidak valid.",
+      });
+    }
+
+    values.push(req.courier.id);
 
     await db.execute(
-      "UPDATE courier_earnings SET status = 'paid', paid_at = NOW() WHERE courier_id = ? AND status = 'available'",
-      [courier_id]
+      `UPDATE couriers
+       SET ${updates.join(", ")}
+       WHERE id = ?`,
+      values
     );
 
-    res.json({ success: true, message: "Pencairan diajukan", payout_id: result.insertId, amount });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-});
-
-router.get("/payouts", async (req, res) => {
-  const { courier_id } = req.query;
-  if (!courier_id) return res.status(400).json({ success: false, message: "courier_id wajib diisi" });
-  try {
     const [rows] = await db.execute(
-      "SELECT * FROM courier_payouts WHERE courier_id = ? ORDER BY requested_at DESC",
-      [courier_id]
+      `SELECT ${COURIER_SELECT}
+       FROM couriers
+       WHERE id = ?
+       LIMIT 1`,
+      [req.courier.id]
     );
-    res.json({ success: true, data: rows });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-});
 
-// ============================================================
-// REGISTER (Kurir Baru)
-// ============================================================
-router.post("/register", async (req, res) => {
-  const { name, email, phone, password, vehicle_type, plate_number, city, payout_method, payout_account } = req.body;
-  if (!name || !email || !password) {
-    return res.status(400).json({ success: false, message: "Nama, email, password wajib diisi" });
-  }
-  try {
-    const [existing] = await db.execute("SELECT id FROM couriers WHERE email = ?", [email]);
-    if (existing.length > 0) {
-      return res.status(409).json({ success: false, message: "Email sudah terdaftar" });
-    }
-    const hash = await bcrypt.hash(password, 10);
-    const publicId = crypto.randomUUID();
-    const [result] = await db.execute(
-      "INSERT INTO couriers (public_id, name, email, phone, password_hash, vehicle_type, plate_number, city, payout_method, payout_account, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
-      [publicId, name, email, phone || null, hash, vehicle_type || null, plate_number || null, city || null, payout_method || null, payout_account || null]
-    );
-    res.json({ success: true, message: "Pendaftaran berhasil. Tunggu verifikasi admin.", courier_id: result.insertId });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-});
-
-// ============================================================
-// LOGIN (Kurir)
-// ============================================================
-router.post("/login", async (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) {
-    return res.status(400).json({ success: false, message: "Email & password wajib diisi" });
-  }
-  try {
-    const [rows] = await db.execute("SELECT * FROM couriers WHERE email = ?", [email]);
-    if (rows.length === 0) {
-      return res.status(401).json({ success: false, message: "Email atau password salah" });
-    }
-    const courier = rows[0];
-    const valid = await bcrypt.compare(password, courier.password_hash);
-    if (!valid) {
-      return res.status(401).json({ success: false, message: "Email atau password salah" });
-    }
-    if (courier.status !== "approved") {
-      return res.status(403).json({ success: false, message: "Akun belum diverifikasi admin" });
-    }
-    const token = jwt.sign(
-      { id: courier.id, public_id: courier.public_id, email: courier.email, role: "courier" },
-      process.env.JWT_SECRET || "nusadhipa-dev-secret",
-      { expiresIn: "7d" }
-    );
-    res.json({
-      success: true, message: "Login berhasil", token,
-      courier: { id: courier.id, public_id: courier.public_id, name: courier.name, email: courier.email, city: courier.city, status: courier.status },
+    return res.json({
+      success: true,
+      message: "Profil kurir berhasil diperbarui.",
+      data: publicCourier(rows[0]),
     });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+  } catch (err) {
+    return sendError(res, err, "Gagal memperbarui profil");
+  }
 });
 
 // ============================================================
-// ADMIN (Verifikasi Kurir)
+// AVAILABLE ROUTES
 // ============================================================
-router.get("/admin/list", async (req, res) => {
+
+router.get("/routes", requireCourierAuth, async (req, res) => {
+  if (req.courier.status !== "approved") {
+    return res.status(403).json({
+      success: false,
+      message: "Hanya kurir yang disetujui yang dapat melihat rute.",
+    });
+  }
+
+  let connection;
+
+  try {
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    const [orders] = await connection.execute(
+      `SELECT o.id, o.order_number, o.shipping_address
+       FROM orders o
+       WHERE o.status IN ('paid', 'processing')
+         AND NOT EXISTS (
+           SELECT 1
+           FROM courier_routes cr
+           WHERE JSON_CONTAINS(
+             cr.order_ids,
+             CAST(o.id AS JSON),
+             '$'
+           )
+         )
+       ORDER BY o.id ASC
+       LIMIT 100
+       FOR UPDATE`
+    );
+
+    if (orders.length > 0) {
+      const groups = new Map();
+
+      for (const order of orders) {
+        const address = String(
+          order.shipping_address || "Alamat belum tersedia"
+        ).trim();
+
+        const area = address.slice(0, 100) || "Area belum ditentukan";
+
+        if (!groups.has(area)) groups.set(area, []);
+        groups.get(area).push(order);
+      }
+
+      for (const [area, groupOrders] of groups.entries()) {
+        const orderIds = groupOrders.map((order) => Number(order.id));
+
+        const customers = groupOrders.map((order) => ({
+          order_id: Number(order.id),
+          order_number: order.order_number,
+          shipping_address: order.shipping_address,
+        }));
+
+        const baseFee = groupOrders.length >= 5 ? 20000 : 10000;
+        const perOrderFee = groupOrders.length >= 5 ? 7000 : 5000;
+        const fee = baseFee + perOrderFee * groupOrders.length;
+
+        const routeCode =
+          `CR-${Date.now()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+
+        await connection.execute(
+          `INSERT INTO courier_routes
+             (route_code, area, order_ids, customers, weight_kg, fee, status)
+           VALUES (?, ?, ?, ?, ?, ?, 'available')`,
+          [
+            routeCode,
+            area,
+            JSON.stringify(orderIds),
+            JSON.stringify(customers),
+            "0.00",
+            fee,
+          ]
+        );
+      }
+    }
+
+    await connection.commit();
+
+    const [routes] = await db.execute(
+      `SELECT
+         id, route_code, area, order_ids, customers,
+         weight_kg, fee, status, created_at
+       FROM courier_routes
+       WHERE status = 'available'
+       ORDER BY created_at ASC`
+    );
+
+    return res.json({ success: true, data: routes });
+  } catch (err) {
+    if (connection) {
+      await connection.rollback().catch(() => {});
+    }
+    return sendError(res, err, "Gagal mengambil rute");
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// ============================================================
+// CLAIM ROUTE
+// ============================================================
+
+router.post("/routes/:id/claim", requireCourierAuth, async (req, res) => {
+  const routeId = parseId(req.params.id);
+
+  if (!routeId) {
+    return res.status(400).json({
+      success: false,
+      message: "ID rute tidak valid.",
+    });
+  }
+
+  if (req.courier.status !== "approved") {
+    return res.status(403).json({
+      success: false,
+      message: "Akun kurir belum disetujui.",
+    });
+  }
+
+  let connection;
+
+  try {
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    const [routes] = await connection.execute(
+      `SELECT id, status
+       FROM courier_routes
+       WHERE id = ?
+       FOR UPDATE`,
+      [routeId]
+    );
+
+    if (!routes.length || routes[0].status !== "available") {
+      await connection.rollback();
+      return res.status(409).json({
+        success: false,
+        message: "Rute tidak tersedia atau sudah diambil kurir lain.",
+      });
+    }
+
+    const [updateResult] = await connection.execute(
+      `UPDATE courier_routes
+       SET status = 'taken', courier_id = ?
+       WHERE id = ? AND status = 'available'`,
+      [req.courier.id, routeId]
+    );
+
+    if (updateResult.affectedRows !== 1) {
+      await connection.rollback();
+      return res.status(409).json({
+        success: false,
+        message: "Rute sudah diambil kurir lain.",
+      });
+    }
+
+    await connection.execute(
+      `INSERT INTO courier_claims (courier_id, route_id, status)
+       VALUES (?, ?, 'claimed')`,
+      [req.courier.id, routeId]
+    );
+
+    await connection.commit();
+
+    return res.json({
+      success: true,
+      message: "Rute berhasil diambil.",
+      data: {
+        route_id: routeId,
+        courier_id: req.courier.id,
+      },
+    });
+  } catch (err) {
+    if (connection) await connection.rollback().catch(() => {});
+    return sendError(res, err, "Gagal mengambil rute");
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// ============================================================
+// MY ROUTES
+// ============================================================
+
+router.get("/routes/mine", requireCourierAuth, async (req, res) => {
   try {
     const [rows] = await db.execute(
-      "SELECT id, public_id, name, email, phone, vehicle_type, plate_number, city, status, created_at FROM couriers ORDER BY created_at DESC"
+      `SELECT
+         id, route_code, area, order_ids, customers,
+         weight_kg, fee, status, created_at
+       FROM courier_routes
+       WHERE courier_id = ?
+         AND status IN ('taken', 'completed')
+       ORDER BY created_at DESC`,
+      [req.courier.id]
     );
-    res.json({ success: true, data: rows });
+
+    return res.json({ success: true, data: rows });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    return sendError(res, err, "Gagal mengambil daftar rute kurir");
   }
 });
 
-router.put("/admin/:id/status", async (req, res) => {
-  const { id } = req.params;
-  const { status } = req.body;
-  if (!["approved", "rejected", "suspended"].includes(status)) {
-    return res.status(400).json({ success: false, message: "Status tidak valid" });
+// ============================================================
+// COMPLETE ROUTE
+// ============================================================
+
+router.post("/routes/:id/complete", requireCourierAuth, async (req, res) => {
+  const routeId = parseId(req.params.id);
+
+  if (!routeId) {
+    return res.status(400).json({
+      success: false,
+      message: "ID rute tidak valid.",
+    });
   }
+
+  let connection;
+
   try {
-    await db.execute("UPDATE couriers SET status = ? WHERE id = ?", [status, id]);
-    res.json({ success: true, message: "Status kurir diupdate" });
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    const [routes] = await connection.execute(
+      `SELECT id, fee, status
+       FROM courier_routes
+       WHERE id = ? AND courier_id = ?
+       FOR UPDATE`,
+      [routeId, req.courier.id]
+    );
+
+    if (!routes.length) {
+      await connection.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "Rute tidak ditemukan untuk akun kurir ini.",
+      });
+    }
+
+    if (routes[0].status !== "taken") {
+      await connection.rollback();
+      return res.status(409).json({
+        success: false,
+        message: "Rute tidak berstatus sedang dikerjakan.",
+      });
+    }
+
+    await connection.execute(
+      `UPDATE courier_routes
+       SET status = 'completed'
+       WHERE id = ? AND courier_id = ?`,
+      [routeId, req.courier.id]
+    );
+
+    await connection.execute(
+      `INSERT INTO courier_earnings
+         (courier_id, route_id, amount, status)
+       VALUES (?, ?, ?, 'available')`,
+      [req.courier.id, routeId, parseMoney(routes[0].fee)]
+    );
+
+    await connection.execute(
+      `UPDATE courier_claims
+       SET status = 'completed'
+       WHERE courier_id = ? AND route_id = ?`,
+      [req.courier.id, routeId]
+    );
+
+    await connection.commit();
+
+    return res.json({
+      success: true,
+      message: "Rute berhasil diselesaikan.",
+    });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    if (connection) await connection.rollback().catch(() => {});
+    return sendError(res, err, "Gagal menyelesaikan rute");
+  } finally {
+    if (connection) connection.release();
   }
 });
 
+// ============================================================
+// EARNINGS
+// ============================================================
+
+router.get("/earnings", requireCourierAuth, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      `SELECT
+         e.id, e.route_id, e.amount, e.status, e.created_at,
+         cr.route_code, cr.area
+       FROM courier_earnings e
+       LEFT JOIN courier_routes cr ON cr.id = e.route_id
+       WHERE e.courier_id = ?
+       ORDER BY e.created_at DESC`,
+      [req.courier.id]
+    );
+
+    const [summaryRows] = await db.execute(
+      `SELECT
+         COALESCE(SUM(CASE WHEN status = 'available' THEN amount ELSE 0 END), 0)
+           AS available_balance,
+         COALESCE(SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END), 0)
+           AS pending_balance,
+         COALESCE(SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END), 0)
+           AS total_paid
+       FROM courier_earnings
+       WHERE courier_id = ?`,
+      [req.courier.id]
+    );
+
+    return res.json({
+      success: true,
+      summary: summaryRows[0],
+      data: rows,
+    });
+  } catch (err) {
+    return sendError(res, err, "Gagal mengambil pendapatan");
+  }
+});
+
+// ============================================================
+// COMPLETED DELIVERIES
+// ============================================================
+
+router.get("/deliveries", requireCourierAuth, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      `SELECT
+         id, route_code, area, order_ids, customers,
+         weight_kg, fee, status, created_at
+       FROM courier_routes
+       WHERE courier_id = ? AND status = 'completed'
+       ORDER BY created_at DESC`,
+      [req.courier.id]
+    );
+
+    return res.json({ success: true, data: rows });
+  } catch (err) {
+    return sendError(res, err, "Gagal mengambil riwayat pengantaran");
+  }
+});
+
+// ============================================================
+// REQUEST PAYOUT
+// ============================================================
+
+router.post("/payouts", requireCourierAuth, async (req, res) => {
+  const method = req.body?.method;
+  const accountNumber =
+    typeof req.body?.account_number === "string"
+      ? req.body.account_number.trim()
+      : "";
+
+  if (!validPayoutMethod(method)) {
+    return res.status(400).json({
+      success: false,
+      message: "Metode pencairan harus bank_transfer atau ewallet.",
+    });
+  }
+
+  if (!accountNumber || accountNumber.length > 100) {
+    return res.status(400).json({
+      success: false,
+      message: "Nomor rekening atau akun pencairan wajib diisi dan maksimal 100 karakter.",
+    });
+  }
+
+  if (req.courier.status !== "approved") {
+    return res.status(403).json({
+      success: false,
+      message: "Akun kurir belum disetujui untuk pencairan.",
+    });
+  }
+
+  let connection;
+
+  try {
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    const [couriers] = await connection.execute(
+      `SELECT id, status
+       FROM couriers
+       WHERE id = ?
+       FOR UPDATE`,
+      [req.courier.id]
+    );
+
+    if (!couriers.length || couriers[0].status !== "approved") {
+      await connection.rollback();
+      return res.status(403).json({
+        success: false,
+        message: "Akun kurir tidak memenuhi syarat pencairan.",
+      });
+    }
+
+    const [earningRows] = await connection.execute(
+      `SELECT id, amount
+       FROM courier_earnings
+       WHERE courier_id = ? AND status = 'available'
+       FOR UPDATE`,
+      [req.courier.id]
+    );
+
+    const amount = earningRows.reduce(
+      (total, earning) => total + parseMoney(earning.amount),
+      0
+    );
+
+    if (amount <= 0 || earningRows.length === 0) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: "Tidak ada saldo tersedia untuk dicairkan.",
+      });
+    }
+
+    const [payoutResult] = await connection.execute(
+      `INSERT INTO courier_payouts
+         (courier_id, amount, method, account_number, status)
+       VALUES (?, ?, ?, ?, 'pending')`,
+      [req.courier.id, amount, method, accountNumber]
+    );
+
+    for (const earning of earningRows) {
+      await connection.execute(
+        `UPDATE courier_earnings
+         SET status = 'pending'
+         WHERE id = ? AND courier_id = ? AND status = 'available'`,
+        [earning.id, req.courier.id]
+      );
+    }
+
+    await connection.commit();
+
+    return res.status(201).json({
+      success: true,
+      message: "Permintaan pencairan berhasil dibuat.",
+      data: {
+        payout_id: payoutResult.insertId,
+        amount,
+        method,
+        status: "pending",
+      },
+    });
+  } catch (err) {
+    if (connection) await connection.rollback().catch(() => {});
+    return sendError(res, err, "Gagal membuat permintaan pencairan");
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// ============================================================
+// PAYOUT HISTORY
+// ============================================================
+
+router.get("/payouts", requireCourierAuth, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      `SELECT
+         id, amount, method, account_number, status, created_at
+       FROM courier_payouts
+       WHERE courier_id = ?
+       ORDER BY created_at DESC`,
+      [req.courier.id]
+    );
+
+    return res.json({ success: true, data: rows });
+  } catch (err) {
+    return sendError(res, err, "Gagal mengambil riwayat pencairan");
+  }
+});
+
+// ============================================================
+// REGISTER — FREELANCE ONLY
+// ============================================================
+
+router.post("/register", async (req, res) => {
+  try {
+    const {
+      name,
+      email,
+      phone,
+      password,
+      vehicle_type,
+      plate_number,
+      city,
+      payout_method,
+      payout_account,
+    } = req.body || {};
+
+    const cleanName = typeof name === "string" ? name.trim() : "";
+    const cleanEmail =
+      typeof email === "string" ? email.trim().toLowerCase() : "";
+    const cleanPassword = typeof password === "string" ? password : "";
+
+    if (!cleanName || cleanName.length > 190) {
+      return res.status(400).json({
+        success: false,
+        message: "Nama wajib diisi dan maksimal 190 karakter.",
+      });
+    }
+
+    if (!validEmail(cleanEmail) || cleanEmail.length > 190) {
+      return res.status(400).json({
+        success: false,
+        message: "Format email tidak valid.",
+      });
+    }
+
+    if (cleanPassword.length < 8 || cleanPassword.length > 128) {
+      return res.status(400).json({
+        success: false,
+        message: "Password wajib 8 sampai 128 karakter.",
+      });
+    }
+
+    const profileInput = {
+      phone: phone ?? null,
+      vehicle_type: vehicle_type ?? null,
+      plate_number: plate_number ?? null,
+      city: city ?? null,
+      payout_account: payout_account ?? null,
+    };
+
+    for (const [field, config] of Object.entries(PROFILE_FIELDS)) {
+      const value = cleanProfileField(profileInput[field], config.max);
+
+      if (value === undefined) {
+        return res.status(400).json({
+          success: false,
+          message: `Field ${field} tidak valid atau terlalu panjang.`,
+        });
+      }
+
+      profileInput[field] = value;
+    }
+
+    const cleanPayoutMethod = payout_method || null;
+
+    if (
+      cleanPayoutMethod !== null &&
+      !validPayoutMethod(cleanPayoutMethod)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Metode pencairan harus bank_transfer atau ewallet.",
+      });
+    }
+
+    if (Boolean(cleanPayoutMethod) !== Boolean(profileInput.payout_account)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Metode dan rekening pencairan harus diisi bersama atau dikosongkan bersama.",
+      });
+    }
+
+    const [existing] = await db.execute(
+      `SELECT id FROM couriers WHERE email = ? LIMIT 1`,
+      [cleanEmail]
+    );
+
+    if (existing.length) {
+      return res.status(409).json({
+        success: false,
+        message: "Email sudah terdaftar.",
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(cleanPassword, 12);
+    const publicId = crypto.randomUUID();
+
+    const [result] = await db.execute(
+      `INSERT INTO couriers
+         (public_id, name, email, phone, password_hash,
+          vehicle_type, partnership_type, plate_number, city,
+          payout_method, payout_account, status)
+       VALUES (?, ?, ?, ?, ?, ?, 'freelance', ?, ?, ?, ?, 'pending')`,
+      [
+        publicId,
+        cleanName,
+        cleanEmail,
+        profileInput.phone,
+        passwordHash,
+        profileInput.vehicle_type,
+        profileInput.plate_number,
+        profileInput.city,
+        cleanPayoutMethod,
+        profileInput.payout_account,
+      ]
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "Pendaftaran kurir freelance berhasil. Akun menunggu persetujuan admin.",
+      data: {
+        id: result.insertId,
+        public_id: publicId,
+        name: cleanName,
+        email: cleanEmail,
+        partnership_type: PARTNERSHIP_TYPE,
+        status: "pending",
+      },
+    });
+  } catch (err) {
+    if (err.code === "ER_DUP_ENTRY") {
+      return res.status(409).json({
+        success: false,
+        message: "Email kurir sudah terdaftar.",
+      });
+    }
+
+    return sendError(res, err, "Gagal mendaftarkan kurir");
+  }
+});
+
+// ============================================================
+// LOGIN
+// ============================================================
+
+router.post("/login", async (req, res) => {
+  try {
+    const email =
+      typeof req.body?.email === "string"
+        ? req.body.email.trim().toLowerCase()
+        : "";
+
+    const password =
+      typeof req.body?.password === "string"
+        ? req.body.password
+        : "";
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Email dan password wajib diisi.",
+      });
+    }
+
+    const [rows] = await db.execute(
+      `SELECT *
+       FROM couriers
+       WHERE email = ?
+       LIMIT 1`,
+      [email]
+    );
+
+    if (!rows.length) {
+      return res.status(401).json({
+        success: false,
+        message: "Email atau password salah.",
+      });
+    }
+
+    const courier = rows[0];
+
+    const passwordMatches = await bcrypt.compare(
+      password,
+      courier.password_hash
+    );
+
+    if (!passwordMatches) {
+      return res.status(401).json({
+        success: false,
+        message: "Email atau password salah.",
+      });
+    }
+
+    if (courier.status !== "approved") {
+      return res.status(403).json({
+        success: false,
+        message:
+          courier.status === "pending"
+            ? "Akun kurir masih menunggu persetujuan admin."
+            : "Akun kurir tidak dapat digunakan.",
+        status: courier.status,
+      });
+    }
+
+    const secret = process.env.JWT_SECRET;
+
+    if (!secret || secret.trim().length < 32) {
+      return res.status(503).json({
+        success: false,
+        message: "Layanan autentikasi belum dikonfigurasi dengan benar.",
+      });
+    }
+
+    const token = jwt.sign(
+      {
+        id: courier.id,
+        public_id: courier.public_id,
+        email: courier.email,
+        role: "courier",
+      },
+      secret.trim(),
+      {
+        algorithm: "HS256",
+        expiresIn: "7d",
+      }
+    );
+
+    return res.json({
+      success: true,
+      message: "Login kurir berhasil.",
+      token,
+      data: publicCourier(courier),
+    });
+  } catch (err) {
+    return sendError(res, err, "Gagal login kurir");
+  }
+});
+
+// ============================================================
+// ADMIN: LIST COURIERS
+//
+// Lindungi endpoint ini dengan middleware autentikasi admin yang
+// benar di konfigurasi server sebelum digunakan di produksi.
+// ============================================================
+
+router.get("/admin/list", requireAuth, requireRole("superadmin"), async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      `SELECT
+         id, public_id, name, email, phone,
+         vehicle_type,
+         COALESCE(partnership_type, 'freelance') AS partnership_type,
+         plate_number, city, payout_method, status, created_at
+       FROM couriers
+       ORDER BY created_at DESC`
+    );
+
+    return res.json({
+      success: true,
+      data: rows,
+    });
+  } catch (err) {
+    return sendError(res, err, "Gagal mengambil daftar kurir");
+  }
+});
+
+// ============================================================
+// ADMIN: CHANGE COURIER STATUS
+//
+// Endpoint ini juga wajib dilindungi autentikasi admin.
+// Jangan mengeksposnya ke internet tanpa middleware admin.
+// ============================================================
+
+router.put("/admin/:id/status", requireAuth, requireRole("superadmin"), async (req, res) => {
+  const courierId = parseId(req.params.id);
+  const status = req.body?.status;
+
+  if (!courierId) {
+    return res.status(400).json({
+      success: false,
+      message: "ID kurir tidak valid.",
+    });
+  }
+
+  if (!VALID_COURIER_STATUSES.includes(status)) {
+    return res.status(400).json({
+      success: false,
+      message: "Status harus approved, rejected, atau suspended.",
+    });
+  }
+
+  try {
+    const [result] = await db.execute(
+      `UPDATE couriers
+       SET status = ?
+       WHERE id = ?`,
+      [status, courierId]
+    );
+
+    if (!result.affectedRows) {
+      return res.status(404).json({
+        success: false,
+        message: "Kurir tidak ditemukan.",
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Status kurir berhasil diperbarui.",
+      data: {
+        id: courierId,
+        status,
+      },
+    });
+  } catch (err) {
+    return sendError(res, err, "Gagal memperbarui status kurir");
+  }
+});
 
 module.exports = router;
 

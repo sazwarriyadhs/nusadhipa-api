@@ -1,35 +1,15 @@
 const express = require("express");
 const multer = require("multer");
 const path = require("path");
-const fs = require("fs");
-const crypto = require("crypto");
 const db = require("../db");
+const requireAuth = require("../middleware/require-auth");
+const { uploadToCloudinary, deleteFromCloudinary } = require("../cloudinary");
 
 const router = express.Router();
 
-function asyncRoute(handler) {
-  return (req, res, next) =>
-    Promise.resolve(handler(req, res, next)).catch(next);
-}
-
-// Setup folder upload
-const UPLOAD_DIR = path.resolve(__dirname, "../../public/uploads/products");
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-}
-
-// Multer config
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    const name = `${Date.now()}-${crypto.randomBytes(6).toString("hex")}${ext}`;
-    cb(null, name);
-  },
-});
-
+// Multer memory storage untuk Cloudinary
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
   fileFilter: (_req, file, cb) => {
     const allowed = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
@@ -41,11 +21,11 @@ const upload = multer({
   },
 });
 
-// POST /api/v1/products/:publicId/images
-router.post(
-  "/products/:publicId/images",
-  upload.single("image"),
-  asyncRoute(async (req, res) => {
+// ============================================================
+// POST /api/v1/uploads — Upload gambar produk (Cloudinary)
+// ============================================================
+router.post("/uploads", requireAuth, upload.single("image"), async (req, res, next) => {
+  try {
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -53,90 +33,76 @@ router.post(
       });
     }
 
-    const publicId = req.params.publicId;
-    const isPrimary = req.body.is_primary === "1" || req.body.is_primary === "true";
-
-    // Cari product
-    const [products] = await db.execute(
-      "SELECT id FROM products WHERE public_id = ? LIMIT 1",
-      [publicId]
+    // Upload ke Cloudinary
+    const result = await uploadToCloudinary(
+      req.file.buffer,
+      `nusadhipa/products/${req.user?.id || "general"}`
     );
-    if (products.length === 0) {
-      // Hapus file yang sudah diupload
-      fs.unlinkSync(req.file.path);
-      return res.status(404).json({
-        success: false,
-        message: "Produk tidak ditemukan.",
-      });
-    }
-    const productId = products[0].id;
 
-    // URL relatif — nanti di-serve sebagai static
-    const imageUrl = `/uploads/products/${req.file.filename}`;
+    // Kalau ada product_id, insert ke product_images
+    const { product_id, is_primary } = req.body || {};
+    let imageRecord = null;
 
-    // Kalau is_primary, unset primary lama
-    if (isPrimary) {
-      await db.execute(
-        "UPDATE product_images SET is_primary = 0 WHERE product_id = ?",
-        [productId]
+    if (product_id) {
+      // Cek produk ada
+      const [products] = await db.execute(
+        "SELECT id FROM products WHERE public_id = ? OR id = ? LIMIT 1",
+        [product_id, product_id]
       );
+
+      if (products.length > 0) {
+        const productId = products[0].id;
+        const [countRows] = await db.execute(
+          "SELECT COUNT(*) AS total FROM product_images WHERE product_id = ?",
+          [productId]
+        );
+        const isPrimary = countRows[0].total === 0 ? 1 : (is_primary ? 1 : 0);
+
+        const [insertResult] = await db.execute(
+          `INSERT INTO product_images 
+            (product_id, image_url, is_primary, sort_order, created_at)
+           VALUES (?, ?, ?, 0, NOW())`,
+          [productId, result.url, isPrimary]
+        );
+
+        imageRecord = {
+          id: insertResult.insertId,
+          product_id: productId,
+          image_url: result.url,
+          is_primary: isPrimary,
+          sort_order: 0,
+        };
+      }
     }
-
-    // Cek apakah sudah ada gambar lain
-    const [existing] = await db.execute(
-      "SELECT COUNT(*) n FROM product_images WHERE product_id = ?",
-      [productId]
-    );
-    const sortOrder = existing[0].n;
-    const finalPrimary = isPrimary || existing[0].n === 0 ? 1 : 0;
-
-    // Insert ke DB
-    const [result] = await db.execute(
-      `INSERT INTO product_images (
-        product_id, image_url, alt_text, sort_order, is_primary
-      ) VALUES (?, ?, ?, ?, ?)`,
-      [productId, imageUrl, null, sortOrder, finalPrimary]
-    );
 
     res.status(201).json({
       success: true,
       message: "Gambar berhasil diunggah.",
-      data: {
-        id: result.insertId,
-        product_id: productId,
-        image_url: imageUrl,
-        is_primary: finalPrimary,
-        sort_order: sortOrder,
+      data: imageRecord || {
+        image_url: result.url,
+        width: result.width,
+        height: result.height,
+        format: result.format,
+        public_id: result.publicId,
       },
     });
-  })
-);
+  } catch (err) {
+    console.error("Upload error:", err);
+    next(err);
+  }
+});
 
-// GET /api/v1/products/:publicId/images
-router.get(
-  "/products/:publicId/images",
-  asyncRoute(async (req, res) => {
-    const [products] = await db.execute(
-      "SELECT id FROM products WHERE public_id = ? LIMIT 1",
-      [req.params.publicId]
-    );
-    if (products.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Produk tidak ditemukan.",
-      });
-    }
-
-    const [images] = await db.execute(
-      `SELECT id, image_url, alt_text, sort_order, is_primary
-       FROM product_images
-       WHERE product_id = ?
-       ORDER BY is_primary DESC, sort_order ASC, id ASC`,
-      [products[0].id]
-    );
-
-    res.json({ success: true, data: images });
-  })
-);
+// ============================================================
+// DELETE /api/v1/uploads/:publicId — Hapus gambar dari Cloudinary
+// ============================================================
+router.delete("/uploads/:publicId", requireAuth, async (req, res, next) => {
+  try {
+    const { publicId } = req.params;
+    await deleteFromCloudinary(publicId);
+    res.json({ success: true, message: "Gambar dihapus." });
+  } catch (err) {
+    next(err);
+  }
+});
 
 module.exports = router;
