@@ -24,7 +24,8 @@ router.get("/legal/summary", async (_req, res) => {
         SUM(CASE WHEN nib IS NOT NULL AND TRIM(nib) <> '' THEN 1 ELSE 0 END) AS businesses_with_nib,
         SUM(CASE WHEN nib IS NULL OR TRIM(nib) = '' THEN 1 ELSE 0 END) AS businesses_without_nib,
         SUM(CASE WHEN verification_status = 'verified' THEN 1 ELSE 0 END) AS verified_businesses,
-        SUM(CASE WHEN verification_status = 'pending' THEN 1 ELSE 0 END) AS pending_businesses
+        SUM(CASE WHEN verification_status = 'pending' THEN 1 ELSE 0 END) AS pending_businesses,
+        SUM(CASE WHEN halal_certificate_url IS NOT NULL AND TRIM(halal_certificate_url) <> '' THEN 1 ELSE 0 END) AS businesses_with_halal
       FROM businesses
     `);
 
@@ -41,7 +42,7 @@ router.get("/legal/summary", async (_req, res) => {
         total_kbli_references: Number(kbliRows[0].total || 0),
       },
       meta: {
-        document_archive_available: false,
+        document_archive_available: true,
         verification_scope: "internal_database_only",
       },
     });
@@ -58,56 +59,55 @@ router.get("/legal/businesses", async (req, res) => {
 
     const [rows] = await db.execute(`
       SELECT
-        b.id,
-        b.public_id,
-        b.business_name,
-        b.legal_name,
-        b.nib,
-        b.kbli_code,
-        COALESCE(NULLIF(b.kbli_name, ''), r.title) AS kbli_name,
-        b.verification_status,
-        b.status,
-        b.city,
-        b.province,
-        b.updated_at
-      FROM businesses b
-      LEFT JOIN ref_kbli_codes r ON r.code = b.kbli_code
-      WHERE (
-        ? = ''
-        OR b.business_name LIKE ?
-        OR COALESCE(b.legal_name, '') LIKE ?
-        OR COALESCE(b.nib, '') LIKE ?
-        OR COALESCE(b.kbli_code, '') LIKE ?
-        OR COALESCE(b.kbli_name, '') LIKE ?
-      )
-      ORDER BY b.updated_at DESC
+        id, public_id, business_name, legal_name,
+        nib, tax_number, kbli_code, kbli_name,
+        halal_certificate_url,
+        halal_certificate_number,
+        halal_owner_name,
+        verification_status, status,
+        province, city, address,
+        updated_at
+      FROM businesses
+      WHERE
+        (? = '%%' OR
+         business_name LIKE ? OR
+         legal_name LIKE ? OR
+         nib LIKE ? OR
+         kbli_code LIKE ? OR
+         kbli_name LIKE ?)
+      ORDER BY business_name ASC
       LIMIT 200
-    `, [search, like, like, like, like, like]);
+    `, [like, like, like, like, like, like]);
 
-    return res.json({ success: true, data: rows });
+    return res.json({
+      success: true,
+      data: rows,
+      meta: {
+        returned: rows.length,
+        max_results: 200,
+      },
+    });
   } catch (error) {
     return sendError(res, "BUSINESSES", error);
   }
 });
 
-// Referensi KBLI: pencarian hanya pada tabel referensi aktif.
+// Pencarian referensi KBLI
 router.get("/legal/kbli", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim().slice(0, 100);
     if (q.length < 2) {
       return res.json({ success: true, data: [] });
     }
-
     const like = `%${q}%`;
+
     const [rows] = await db.execute(`
-      SELECT code, title, description, level, parent_code, section_code, source_version
+      SELECT code, title, description, level, source_version
       FROM ref_kbli_codes
-      WHERE code LIKE ? OR title LIKE ? OR COALESCE(description, '') LIKE ?
-      ORDER BY
-        CASE WHEN code = ? THEN 0 WHEN code LIKE ? THEN 1 ELSE 2 END,
-        code
+      WHERE code LIKE ? OR title LIKE ? OR description LIKE ?
+      ORDER BY code ASC
       LIMIT 50
-    `, [like, like, like, q, `${q}%`]);
+    `, [like, like, like]);
 
     return res.json({ success: true, data: rows });
   } catch (error) {

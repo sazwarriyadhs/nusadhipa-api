@@ -249,78 +249,7 @@ router.get("/routes", requireCourierAuth, async (req, res) => {
     });
   }
 
-  let connection;
-
   try {
-    connection = await db.getConnection();
-    await connection.beginTransaction();
-
-    const [orders] = await connection.execute(
-      `SELECT o.id, o.order_number, o.shipping_address
-       FROM orders o
-       WHERE o.status IN ('paid', 'processing')
-         AND NOT EXISTS (
-           SELECT 1
-           FROM courier_routes cr
-           WHERE JSON_CONTAINS(
-             cr.order_ids,
-             CAST(o.id AS JSON),
-             '$'
-           )
-         )
-       ORDER BY o.id ASC
-       LIMIT 100
-       FOR UPDATE`
-    );
-
-    if (orders.length > 0) {
-      const groups = new Map();
-
-      for (const order of orders) {
-        const address = String(
-          order.shipping_address || "Alamat belum tersedia"
-        ).trim();
-
-        const area = address.slice(0, 100) || "Area belum ditentukan";
-
-        if (!groups.has(area)) groups.set(area, []);
-        groups.get(area).push(order);
-      }
-
-      for (const [area, groupOrders] of groups.entries()) {
-        const orderIds = groupOrders.map((order) => Number(order.id));
-
-        const customers = groupOrders.map((order) => ({
-          order_id: Number(order.id),
-          order_number: order.order_number,
-          shipping_address: order.shipping_address,
-        }));
-
-        const baseFee = groupOrders.length >= 5 ? 20000 : 10000;
-        const perOrderFee = groupOrders.length >= 5 ? 7000 : 5000;
-        const fee = baseFee + perOrderFee * groupOrders.length;
-
-        const routeCode =
-          `CR-${Date.now()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
-
-        await connection.execute(
-          `INSERT INTO courier_routes
-             (route_code, area, order_ids, customers, weight_kg, fee, status)
-           VALUES (?, ?, ?, ?, ?, ?, 'available')`,
-          [
-            routeCode,
-            area,
-            JSON.stringify(orderIds),
-            JSON.stringify(customers),
-            "0.00",
-            fee,
-          ]
-        );
-      }
-    }
-
-    await connection.commit();
-
     const [routes] = await db.execute(
       `SELECT
          id, route_code, area, order_ids, customers,
@@ -330,17 +259,31 @@ router.get("/routes", requireCourierAuth, async (req, res) => {
        ORDER BY created_at ASC`
     );
 
-    return res.json({ success: true, data: routes });
+    const parsedRoutes = routes.map((r) => {
+      let orderIds = [];
+      let customers = [];
+      try {
+        orderIds = typeof r.order_ids === "string" ? JSON.parse(r.order_ids) : r.order_ids;
+      } catch (_) {
+        orderIds = String(r.order_ids || "")
+          .split(",")
+          .map((s) => Number(s.trim()))
+          .filter((n) => n > 0);
+      }
+      try {
+        customers = typeof r.customers === "string" ? JSON.parse(r.customers) : r.customers;
+      } catch (_) {
+        customers = [];
+      }
+      return { ...r, order_ids: orderIds, customers };
+    });
+
+    return res.json({ success: true, data: parsedRoutes });
   } catch (err) {
-    if (connection) {
-      await connection.rollback().catch(() => {});
-    }
+    console.error("[COURIER ROUTES] Error:", err);
     return sendError(res, err, "Gagal mengambil rute");
-  } finally {
-    if (connection) connection.release();
   }
 });
-
 // ============================================================
 // CLAIM ROUTE
 // ============================================================
@@ -1042,4 +985,5 @@ router.put("/admin/:id/status", requireAuth, requireRole("superadmin"), async (r
 });
 
 module.exports = router;
+
 

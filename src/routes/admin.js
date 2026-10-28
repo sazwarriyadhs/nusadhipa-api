@@ -1,4 +1,3 @@
-
 const express = require("express");
 const requireAuth = require("../middleware/require-auth");
 const router = express.Router();
@@ -69,6 +68,9 @@ router.get("/tenants", async (req, res) => {
         business_type,
         city,
         province,
+        latitude,
+        longitude,
+        logo_url,
         verification_status,
         status,
         created_at
