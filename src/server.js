@@ -21,6 +21,7 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
   contentSecurityPolicy: false,
 }));
+
 // Pattern untuk dev — semua localhost + LAN IP (Flutter Web port random)
 const devOriginPatterns = [
   /^http:\/\/localhost(:\d+)?$/,
@@ -45,13 +46,13 @@ app.use(cors({
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
+
 app.use(express.json({ limit: "1mb" }));
 
 // ===== Static file serving untuk gambar upload =====
 const path = require("path");
 const publicDir = path.resolve(__dirname, "../public");
 app.use("/uploads", (req, res, next) => {
-  // Izinkan cross-origin untuk gambar (web marketplace beda domain/port)
   res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
   res.setHeader("Access-Control-Allow-Origin", "*");
   next();
@@ -110,6 +111,7 @@ app.get("/api/v1/health/db", async (_req, res) => {
   }
 });
 
+// ===== Daftar route API =====
 app.use("/api/v1", require("./routes/auth"));
 app.use("/api/v1", require("./routes/business-locations"));
 app.use("/api/v1", require("./routes/business"));
@@ -121,10 +123,15 @@ app.use("/api/v1", require("./routes/uploads"));
 app.use("/api/v1", require("./routes/catalog"));
 app.use("/api/v1", require("./routes/market-insight"));
 app.use("/api/v1/courier", require("./routes/courier"));
+
+// ===== Route admin =====
 app.use("/api/v1/admin", require("./routes/admin"));
 app.use("/api/v1/admin", require("./routes/admin-finance"));
 app.use("/api/v1/admin", require("./routes/admin-settings"));
 app.use("/api/v1/admin", require("./routes/admin-legal"));
+
+// ===== Route legal service (BARU) =====
+app.use("/api/v1/admin/legal-service", require("./routes/legal-service"));
 
 app.use((req, res) => {
   res.status(404).json({
@@ -168,7 +175,3 @@ server = app.listen(port, host, () => {
 });
 
 module.exports = app;
-
-
-
-

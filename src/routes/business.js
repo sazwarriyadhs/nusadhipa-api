@@ -16,11 +16,17 @@ const businessUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
   fileFilter: (_req, file, cb) => {
-    const allowed = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
+    const allowed = [
+      "image/jpeg",
+      "image/jpg",
+      "image/png",
+      "image/webp",
+      "application/pdf",
+    ];
     if (allowed.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error("Format tidak didukung. Gunakan JPG/PNG/WebP."));
+      cb(new Error("Format tidak didukung. Gunakan JPG/PNG/WebP/PDF."));
     }
   },
 });
@@ -63,6 +69,7 @@ router.get("/businesses/me", async (req, res, next) => {
         id, public_id, business_name, legal_name, slug, business_type,
         description, logo_url, banner_url, email, phone,
         province, city, address, nib, tax_number,
+        halal_certificate_url,
         kbli_code, kbli_name, verification_status, status
        FROM businesses
        WHERE id = ? LIMIT 1`,
@@ -101,6 +108,7 @@ router.get("/businesses/me", async (req, res, next) => {
       address: biz.address,
       nib: biz.nib,
       tax_number: biz.tax_number,
+      halal_certificate_url: biz.halal_certificate_url,
       kbli_code: biz.kbli_code,
       kbli_name: biz.kbli_name,
       verification_status: biz.verification_status,
@@ -141,14 +149,12 @@ router.post(
         });
       }
 
-      // Hapus logo lama dari Cloudinary
       const oldUrl = bizRows[0].logo_url;
       if (oldUrl && oldUrl.includes('res.cloudinary.com')) {
         const match = oldUrl.match(/\/v\d+\/(.+)\./);
         if (match) await deleteFromCloudinary(match[1]);
       }
 
-      // Upload ke Cloudinary
       const result = await uploadToCloudinary(
         req.file.buffer,
         `nusadhipa/logos/${bizRows[0].id}`
@@ -215,6 +221,57 @@ router.post(
         success: true,
         message: "Banner berhasil diunggah.",
         data: { banner_url: result.url },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ============================================================
+// POST /businesses/me/halal-certificate — Upload Sertifikat Halal
+// ============================================================
+router.post(
+  "/businesses/me/halal-certificate",
+  requireAuth,
+  businessUpload.single("document"),
+  async (req, res, next) => {
+    try {
+      const [bizRows] = await db.execute(
+        "SELECT id, halal_certificate_url FROM businesses WHERE owner_user_id = ? LIMIT 1",
+        [req.user.id]
+      );
+      if (!bizRows.length) {
+        return res.status(404).json({ success: false, message: "Business tidak ditemukan" });
+      }
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message: "File sertifikat halal wajib diunggah.",
+        });
+      }
+
+      const oldUrl = bizRows[0].halal_certificate_url;
+      if (oldUrl && oldUrl.includes('res.cloudinary.com')) {
+        const match = oldUrl.match(/\/v\d+\/(.+)\./);
+        if (match) await deleteFromCloudinary(match[1]);
+      }
+
+      const result = await uploadToCloudinary(
+        req.file.buffer,
+        `nusadhipa/halal-certificates/${bizRows[0].id}`
+      );
+
+      const businessId = bizRows[0].id;
+      await db.execute(
+        "UPDATE businesses SET halal_certificate_url = ?, updated_at = NOW() WHERE id = ?",
+        [result.url, businessId]
+      );
+
+      res.json({
+        success: true,
+        message: "Sertifikat Halal berhasil diunggah.",
+        data: { halal_certificate_url: result.url },
       });
     } catch (err) {
       next(err);
