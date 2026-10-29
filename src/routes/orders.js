@@ -787,4 +787,34 @@ router.post(
   })
 );
 
+
+
+
+// ============================================================
+// POST /orders/:publicId/assign-courier
+// ============================================================
+router.post("/orders/:publicId/assign-courier", asyncRoute(async (req, res) => {
+  const { courier_id } = req.body || {};
+  if (!courier_id) return res.status(400).json({ success: false, message: "courier_id wajib diisi." });
+
+  const [orders] = await db.execute(
+    `SELECT id, order_number, status, claim_status FROM orders WHERE public_id = ? LIMIT 1`,
+    [req.params.publicId]
+  );
+  if (!orders.length) return res.status(404).json({ success: false, message: "Order tidak ditemukan." });
+  const order = orders[0];
+  if (order.claim_status === 'taken') return res.status(409).json({ success: false, message: "Order sudah punya kurir." });
+
+  const [couriers] = await db.execute(`SELECT id, name, status FROM couriers WHERE id = ? LIMIT 1`, [courier_id]);
+  if (!couriers.length || couriers[0].status !== 'approved') {
+    return res.status(400).json({ success: false, message: "Kurir tidak valid." });
+  }
+
+  await db.execute(
+    `UPDATE orders SET courier_id = ?, claim_status = 'taken', claimed_at = NOW(), updated_at = NOW() WHERE id = ?`,
+    [courier_id, order.id]
+  );
+  res.json({ success: true, message: `Order di-assign ke ${couriers[0].name}.` });
+}));
+
 module.exports = router;
