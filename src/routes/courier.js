@@ -557,15 +557,17 @@ router.get("/earnings", requireCourierAuth, async (req, res) => {
 router.get("/deliveries", requireCourierAuth, async (req, res) => {
   try {
     const [rows] = await db.execute(
-      `SELECT
-         id, route_code, area, order_ids, customers,
-         weight_kg, fee, status, created_at
-       FROM courier_routes
-       WHERE courier_id = ? AND status = 'completed'
-       ORDER BY created_at DESC`,
+      `SELECT o.id, o.public_id, o.order_number, o.grand_total,
+              o.shipping_distance_km, o.shipping_lat, o.shipping_lng,
+              o.claim_status, o.status, o.shipping_address,
+              u.full_name AS buyer_name
+       FROM orders o
+       LEFT JOIN users u ON u.id = o.buyer_user_id
+       WHERE o.courier_id = ? 
+         AND o.claim_status IN ('taken', 'completed')
+       ORDER BY o.claimed_at DESC`,
       [req.courier.id]
     );
-
     return res.json({ success: true, data: rows });
   } catch (err) {
     return sendError(res, err, "Gagal mengambil riwayat pengantaran");
@@ -1015,5 +1017,6 @@ router.put("/admin/:id/status", requireAuth, requireRole("superadmin"), async (r
 });
 
 module.exports = router;
+
 
 
