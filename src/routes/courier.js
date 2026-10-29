@@ -473,34 +473,39 @@ router.post("/routes/:id/complete", requireCourierAuth, async (req, res) => {
 // ============================================================
 router.get("/earnings", requireCourierAuth, async (req, res) => {
   try {
-    const [rows] = await db.execute(
+    const [summaryRows] = await db.execute(
       `SELECT
-         e.id, e.route_id, e.amount, e.status, e.created_at,
-         cr.route_code, cr.area
-       FROM courier_earnings e
-       LEFT JOIN courier_routes cr ON cr.id = e.route_id
-       WHERE e.courier_id = ?
-       ORDER BY e.created_at DESC`,
+         COALESCE(SUM(CASE WHEN o.claim_status = 'completed' THEN o.grand_total ELSE 0 END), 0) AS total_earnings,
+         COUNT(CASE WHEN o.claim_status = 'completed' THEN 1 END) AS total_orders,
+         COALESCE(SUM(CASE WHEN o.claim_status = 'completed' THEN 5000 ELSE 0 END), 0) AS available_balance
+       FROM orders o
+       WHERE o.courier_id = ?`,
       [req.courier.id]
     );
 
-    const [summaryRows] = await db.execute(
-      `SELECT
-         COALESCE(SUM(CASE WHEN status = 'available' THEN amount ELSE 0 END), 0)
-           AS available_balance,
-         COALESCE(SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END), 0)
-           AS pending_balance,
-         COALESCE(SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END), 0)
-           AS total_paid
-       FROM courier_earnings
-       WHERE courier_id = ?`,
+    const [rows] = await db.execute(
+      `SELECT o.id, o.order_number, o.grand_total, o.claimed_at, o.completed_at
+       FROM orders o
+       WHERE o.courier_id = ? AND o.claim_status = 'completed'
+       ORDER BY o.completed_at DESC`,
       [req.courier.id]
     );
+
+    const summary = summaryRows[0];
 
     return res.json({
       success: true,
-      summary: summaryRows[0],
-      data: rows,
+      data: {
+        balance: Number(summary.available_balance),
+        pending: 0,
+        total: Number(summary.total_earnings),
+        history: rows.map(r => ({
+          id: r.id,
+          order_number: r.order_number,
+          amount: Number(r.grand_total),
+          created_at: r.completed_at || r.claimed_at,
+        })),
+      },
     });
   } catch (err) {
     return sendError(res, err, "Gagal mengambil pendapatan");
@@ -973,6 +978,7 @@ router.put("/admin/:id/status", requireAuth, requireRole("superadmin"), async (r
 });
 
 module.exports = router;
+
 
 
 
