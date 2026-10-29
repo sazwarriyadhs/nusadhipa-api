@@ -280,7 +280,7 @@ router.get("/available", requireAuth, async (req, res) => {
         ...c,
         distance_km: haversineDistance(bizLat, bizLng, parseFloat(c.latitude), parseFloat(c.longitude)),
       }))
-      .filter(c => c.distance_km <= radiusKm && Number(c.active_orders) === 0)
+      .filter(c => c.distance_km <= radiusKm )
       .sort((a, b) => a.distance_km - b.distance_km);
 
     return res.json({ success: true, data: available });
@@ -1015,4 +1015,5 @@ router.put("/admin/:id/status", requireAuth, requireRole("superadmin"), async (r
 });
 
 module.exports = router;
+
 
