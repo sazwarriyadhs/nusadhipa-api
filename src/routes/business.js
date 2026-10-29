@@ -54,7 +54,7 @@ router.get("/businesses/me", async (req, res, next) => {
           businessId = payload.businessId;
         } else if (payload?.userId) {
           const [bizRows] = await db.execute(
-            "SELECT id FROM businesses WHERE owner_user_id = ? LIMIT 1",
+            "SELECT id FROM businesses WHERE owner_user_id = ?",
             [payload.userId]
           );
           if (bizRows.length > 0) businessId = bizRows[0].id;
