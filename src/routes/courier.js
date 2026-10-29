@@ -238,9 +238,31 @@ router.put("/profile", requireCourierAuth, async (req, res) => {
 });
 
 // ============================================================
-// AVAILABLE ROUTES
+// AVAILABLE COURIERS (buat Tenant)
 // ============================================================
+router.get("/available", requireAuth, async (req, res) => {
+  try {
+    const [couriers] = await db.execute(
+      `SELECT c.id, c.public_id, c.name, c.phone, c.vehicle_type, c.city,
+         (SELECT COUNT(*) FROM orders o 
+          WHERE o.courier_id = c.id 
+            AND o.claim_status = 'taken' 
+            AND o.status NOT IN ('completed','cancelled')) AS active_orders
+       FROM couriers c
+       WHERE c.status = 'approved'
+       ORDER BY active_orders ASC`
+    );
+    const available = couriers.filter(c => Number(c.active_orders) === 0);
+    return res.json({ success: true, data: available });
+  } catch (err) {
+    console.error("[COURIER AVAILABLE] Error:", err);
+    return sendError(res, err, "Gagal mengambil daftar kurir");
+  }
+});
 
+// ============================================================
+// AVAILABLE ROUTES (buat Kurir — order requested)
+// ============================================================
 router.get("/routes", requireCourierAuth, async (req, res) => {
   if (req.courier.status !== "approved") {
     return res.status(403).json({
@@ -251,43 +273,25 @@ router.get("/routes", requireCourierAuth, async (req, res) => {
 
   try {
     const [routes] = await db.execute(
-      `SELECT
-         id, route_code, area, order_ids, customers,
-         weight_kg, fee, status, created_at
-       FROM courier_routes
-       WHERE status = 'available'
-       ORDER BY created_at ASC`
+      `SELECT o.id, o.public_id, o.order_number, o.grand_total,
+              o.shipping_distance_km, o.shipping_lat, o.shipping_lng,
+              o.claim_status, o.status, o.shipping_address,
+              u.full_name AS buyer_name
+       FROM orders o
+       LEFT JOIN users u ON u.id = o.buyer_user_id
+       WHERE o.claim_status = 'requested' AND o.courier_id IS NULL
+       ORDER BY o.placed_at ASC`
     );
-
-    const parsedRoutes = routes.map((r) => {
-      let orderIds = [];
-      let customers = [];
-      try {
-        orderIds = typeof r.order_ids === "string" ? JSON.parse(r.order_ids) : r.order_ids;
-      } catch (_) {
-        orderIds = String(r.order_ids || "")
-          .split(",")
-          .map((s) => Number(s.trim()))
-          .filter((n) => n > 0);
-      }
-      try {
-        customers = typeof r.customers === "string" ? JSON.parse(r.customers) : r.customers;
-      } catch (_) {
-        customers = [];
-      }
-      return { ...r, order_ids: orderIds, customers };
-    });
-
-    return res.json({ success: true, data: parsedRoutes });
+    return res.json({ success: true, data: routes });
   } catch (err) {
     console.error("[COURIER ROUTES] Error:", err);
     return sendError(res, err, "Gagal mengambil rute");
   }
 });
-// ============================================================
-// CLAIM ROUTE
-// ============================================================
 
+// ============================================================
+// CLAIM ROUTE (buat Kurir)
+// ============================================================
 router.post("/routes/:id/claim", requireCourierAuth, async (req, res) => {
   const routeId = parseId(req.params.id);
 
@@ -311,40 +315,34 @@ router.post("/routes/:id/claim", requireCourierAuth, async (req, res) => {
     connection = await db.getConnection();
     await connection.beginTransaction();
 
-    const [routes] = await connection.execute(
-      `SELECT id, status
-       FROM courier_routes
+    const [orders] = await connection.execute(
+      `SELECT id, order_number, claim_status
+       FROM orders
        WHERE id = ?
        FOR UPDATE`,
       [routeId]
     );
 
-    if (!routes.length || routes[0].status !== "available") {
+    if (!orders.length) {
       await connection.rollback();
-      return res.status(409).json({
+      return res.status(404).json({
         success: false,
-        message: "Rute tidak tersedia atau sudah diambil kurir lain.",
+        message: "Order tidak ditemukan.",
       });
     }
 
-    const [updateResult] = await connection.execute(
-      `UPDATE courier_routes
-       SET status = 'taken', courier_id = ?
-       WHERE id = ? AND status = 'available'`,
-      [req.courier.id, routeId]
-    );
-
-    if (updateResult.affectedRows !== 1) {
+    if (orders[0].claim_status === "taken") {
       await connection.rollback();
       return res.status(409).json({
         success: false,
-        message: "Rute sudah diambil kurir lain.",
+        message: "Order sudah diambil kurir lain.",
       });
     }
 
     await connection.execute(
-      `INSERT INTO courier_claims (courier_id, route_id, status)
-       VALUES (?, ?, 'claimed')`,
+      `UPDATE orders
+       SET courier_id = ?, claim_status = 'taken', claimed_at = NOW()
+       WHERE id = ?`,
       [req.courier.id, routeId]
     );
 
@@ -352,15 +350,12 @@ router.post("/routes/:id/claim", requireCourierAuth, async (req, res) => {
 
     return res.json({
       success: true,
-      message: "Rute berhasil diambil.",
-      data: {
-        route_id: routeId,
-        courier_id: req.courier.id,
-      },
+      message: "Rute berhasil diklaim.",
+      data: { order_number: orders[0].order_number },
     });
   } catch (err) {
     if (connection) await connection.rollback().catch(() => {});
-    return sendError(res, err, "Gagal mengambil rute");
+    return sendError(res, err, "Gagal klaim rute");
   } finally {
     if (connection) connection.release();
   }
@@ -369,13 +364,11 @@ router.post("/routes/:id/claim", requireCourierAuth, async (req, res) => {
 // ============================================================
 // MY ROUTES
 // ============================================================
-
 router.get("/routes/mine", requireCourierAuth, async (req, res) => {
   try {
     const [rows] = await db.execute(
-      `SELECT
-         id, route_code, area, order_ids, customers,
-         weight_kg, fee, status, created_at
+      `SELECT id, route_code, area, order_ids, customers,
+              weight_kg, fee, status, created_at
        FROM courier_routes
        WHERE courier_id = ?
          AND status IN ('taken', 'completed')
@@ -392,7 +385,6 @@ router.get("/routes/mine", requireCourierAuth, async (req, res) => {
 // ============================================================
 // COMPLETE ROUTE
 // ============================================================
-
 router.post("/routes/:id/complete", requireCourierAuth, async (req, res) => {
   const routeId = parseId(req.params.id);
 
@@ -471,7 +463,6 @@ router.post("/routes/:id/complete", requireCourierAuth, async (req, res) => {
 // ============================================================
 // EARNINGS
 // ============================================================
-
 router.get("/earnings", requireCourierAuth, async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -511,7 +502,6 @@ router.get("/earnings", requireCourierAuth, async (req, res) => {
 // ============================================================
 // COMPLETED DELIVERIES
 // ============================================================
-
 router.get("/deliveries", requireCourierAuth, async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -533,7 +523,6 @@ router.get("/deliveries", requireCourierAuth, async (req, res) => {
 // ============================================================
 // REQUEST PAYOUT
 // ============================================================
-
 router.post("/payouts", requireCourierAuth, async (req, res) => {
   const method = req.body?.method;
   const accountNumber =
@@ -644,7 +633,6 @@ router.post("/payouts", requireCourierAuth, async (req, res) => {
 // ============================================================
 // PAYOUT HISTORY
 // ============================================================
-
 router.get("/payouts", requireCourierAuth, async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -665,7 +653,6 @@ router.get("/payouts", requireCourierAuth, async (req, res) => {
 // ============================================================
 // REGISTER — FREELANCE ONLY
 // ============================================================
-
 router.post("/register", async (req, res) => {
   try {
     const {
@@ -809,7 +796,6 @@ router.post("/register", async (req, res) => {
 // ============================================================
 // LOGIN
 // ============================================================
-
 router.post("/login", async (req, res) => {
   try {
     const email =
@@ -905,11 +891,7 @@ router.post("/login", async (req, res) => {
 
 // ============================================================
 // ADMIN: LIST COURIERS
-//
-// Lindungi endpoint ini dengan middleware autentikasi admin yang
-// benar di konfigurasi server sebelum digunakan di produksi.
 // ============================================================
-
 router.get("/admin/list", requireAuth, requireRole("superadmin"), async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -933,11 +915,7 @@ router.get("/admin/list", requireAuth, requireRole("superadmin"), async (req, re
 
 // ============================================================
 // ADMIN: CHANGE COURIER STATUS
-//
-// Endpoint ini juga wajib dilindungi autentikasi admin.
-// Jangan mengeksposnya ke internet tanpa middleware admin.
 // ============================================================
-
 router.put("/admin/:id/status", requireAuth, requireRole("superadmin"), async (req, res) => {
   const courierId = parseId(req.params.id);
   const status = req.body?.status;
@@ -985,5 +963,3 @@ router.put("/admin/:id/status", requireAuth, requireRole("superadmin"), async (r
 });
 
 module.exports = router;
-
-
