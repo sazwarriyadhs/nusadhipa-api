@@ -448,7 +448,7 @@ router.post("/routes/:id/complete", requireCourierAuth, async (req, res) => {
       [routeId]
     );
     if (!orders.length) return res.status(404).json({ success: false, message: "Order tidak ditemukan." });
-    if (orders[0].courier_id !== req.courier.id) {
+    if (Number(orders[0].courier_id) !== Number(req.courier.id)) {
       return res.status(403).json({ success: false, message: "Order bukan milik kurir ini." });
     }
     if (orders[0].claim_status !== 'taken') {
@@ -973,6 +973,7 @@ router.put("/admin/:id/status", requireAuth, requireRole("superadmin"), async (r
 });
 
 module.exports = router;
+
 
 
 
