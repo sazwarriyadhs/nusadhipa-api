@@ -540,88 +540,47 @@ router.get("/deliveries", requireCourierAuth, async (req, res) => {
 // ============================================================
 router.post("/payouts", requireCourierAuth, async (req, res) => {
   const method = req.body?.method;
-  const accountNumber =
-    typeof req.body?.account_number === "string"
-      ? req.body.account_number.trim()
-      : "";
+  const accountNumber = typeof req.body?.account_number === "string" ? req.body.account_number.trim() : "";
 
   if (!validPayoutMethod(method)) {
-    return res.status(400).json({
-      success: false,
-      message: "Metode pencairan harus bank_transfer atau ewallet.",
-    });
+    return res.status(400).json({ success: false, message: "Metode pencairan harus bank_transfer atau ewallet." });
   }
-
   if (!accountNumber || accountNumber.length > 100) {
-    return res.status(400).json({
-      success: false,
-      message: "Nomor rekening atau akun pencairan wajib diisi dan maksimal 100 karakter.",
-    });
+    return res.status(400).json({ success: false, message: "Nomor rekening wajib diisi (max 100 karakter)." });
   }
-
   if (req.courier.status !== "approved") {
-    return res.status(403).json({
-      success: false,
-      message: "Akun kurir belum disetujui untuk pencairan.",
-    });
+    return res.status(403).json({ success: false, message: "Akun kurir belum disetujui." });
   }
 
   let connection;
-
   try {
     connection = await db.getConnection();
     await connection.beginTransaction();
 
-    const [couriers] = await connection.execute(
-      `SELECT id, status
-       FROM couriers
-       WHERE id = ?
-       FOR UPDATE`,
-      [req.courier.id]
-    );
-
-    if (!couriers.length || couriers[0].status !== "approved") {
-      await connection.rollback();
-      return res.status(403).json({
-        success: false,
-        message: "Akun kurir tidak memenuhi syarat pencairan.",
-      });
-    }
-
     const [earningRows] = await connection.execute(
-      `SELECT id, amount
-       FROM courier_earnings
-       WHERE courier_id = ? AND status = 'available'
+      `SELECT id FROM orders 
+       WHERE courier_id = ? AND claim_status = 'completed' 
        FOR UPDATE`,
       [req.courier.id]
     );
 
-    const amount = earningRows.reduce(
-      (total, earning) => total + parseMoney(earning.amount),
-      0
-    );
+    const amount = earningRows.length * 5000;
 
-    if (amount <= 0 || earningRows.length === 0) {
+    if (amount <= 0) {
       await connection.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Tidak ada saldo tersedia untuk dicairkan.",
-      });
+      return res.status(400).json({ success: false, message: "Tidak ada saldo tersedia untuk dicairkan." });
     }
 
     const [payoutResult] = await connection.execute(
-      `INSERT INTO courier_payouts
-         (courier_id, amount, method, account_number, status)
+      `INSERT INTO courier_payouts (courier_id, amount, method, account_number, status)
        VALUES (?, ?, ?, ?, 'pending')`,
       [req.courier.id, amount, method, accountNumber]
     );
 
-    for (const earning of earningRows) {
+    for (const order of earningRows) {
       await connection.execute(
-        `UPDATE courier_earnings
-         SET status = 'pending'
-         WHERE id = ? AND courier_id = ? AND status = 'available'`,
-        [earning.id, req.courier.id]
+        `UPDATE orders SET claim_status = 'paid_out' WHERE id = ?`,
+        [order.id]
       );
     }
 
@@ -630,12 +589,7 @@ router.post("/payouts", requireCourierAuth, async (req, res) => {
     return res.status(201).json({
       success: true,
       message: "Permintaan pencairan berhasil dibuat.",
-      data: {
-        payout_id: payoutResult.insertId,
-        amount,
-        method,
-        status: "pending",
-      },
+      data: { payout_id: payoutResult.insertId, amount, method, status: "pending" },
     });
   } catch (err) {
     if (connection) await connection.rollback().catch(() => {});
@@ -978,6 +932,7 @@ router.put("/admin/:id/status", requireAuth, requireRole("superadmin"), async (r
 });
 
 module.exports = router;
+
 
 
 
