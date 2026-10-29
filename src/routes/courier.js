@@ -29,6 +29,18 @@ function sendError(res, err, message) {
   });
 }
 
+// Haversine distance (km)
+function haversineDistance(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
 function parseId(value) {
   const id = Number(value);
   return Number.isSafeInteger(id) && id > 0 ? id : null;
@@ -242,17 +254,35 @@ router.put("/profile", requireCourierAuth, async (req, res) => {
 // ============================================================
 router.get("/available", requireAuth, async (req, res) => {
   try {
+    const bizLat = parseFloat(req.query.lat);
+    const bizLng = parseFloat(req.query.lng);
+    const radiusKm = parseFloat(req.query.radius) || 5;
+
+    if (!Number.isFinite(bizLat) || !Number.isFinite(bizLng)) {
+      return res.status(400).json({ success: false, message: "Lokasi tenant (lat/lng) wajib diisi." });
+    }
+
     const [couriers] = await db.execute(
-      `SELECT c.id, c.public_id, c.name, c.phone, c.vehicle_type, c.city,
+      `SELECT c.id, c.public_id, c.name, c.phone, c.vehicle_type, c.city, c.avatar_url,
+              c.latitude, c.longitude,
          (SELECT COUNT(*) FROM orders o 
           WHERE o.courier_id = c.id 
             AND o.claim_status = 'taken' 
             AND o.status NOT IN ('completed','cancelled')) AS active_orders
        FROM couriers c
        WHERE c.status = 'approved'
-       ORDER BY active_orders ASC`
+         AND c.latitude IS NOT NULL 
+         AND c.longitude IS NOT NULL`
     );
-    const available = couriers.filter(c => Number(c.active_orders) === 0);
+
+    const available = couriers
+      .map(c => ({
+        ...c,
+        distance_km: haversineDistance(bizLat, bizLng, parseFloat(c.latitude), parseFloat(c.longitude)),
+      }))
+      .filter(c => c.distance_km <= radiusKm && Number(c.active_orders) === 0)
+      .sort((a, b) => a.distance_km - b.distance_km);
+
     return res.json({ success: true, data: available });
   } catch (err) {
     console.error("[COURIER AVAILABLE] Error:", err);
@@ -265,14 +295,19 @@ router.get("/available", requireAuth, async (req, res) => {
 // ============================================================
 router.get("/routes", requireCourierAuth, async (req, res) => {
   if (req.courier.status !== "approved") {
-    return res.status(403).json({
-      success: false,
-      message: "Hanya kurir yang disetujui yang dapat melihat rute.",
-    });
+    return res.status(403).json({ success: false, message: "Hanya kurir approved yang bisa lihat rute." });
   }
 
   try {
-    const [routes] = await db.execute(
+    const [courierRows] = await db.execute(
+      `SELECT latitude, longitude FROM couriers WHERE id = ? LIMIT 1`,
+      [req.courier.id]
+    );
+    const courierLat = parseFloat(courierRows[0]?.latitude);
+    const courierLng = parseFloat(courierRows[0]?.longitude);
+    const radiusKm = parseFloat(req.query.radius) || 5;
+
+    const [orders] = await db.execute(
       `SELECT o.id, o.public_id, o.order_number, o.grand_total,
               o.shipping_distance_km, o.shipping_lat, o.shipping_lng,
               o.claim_status, o.status, o.shipping_address,
@@ -280,9 +315,26 @@ router.get("/routes", requireCourierAuth, async (req, res) => {
        FROM orders o
        LEFT JOIN users u ON u.id = o.buyer_user_id
        WHERE o.claim_status = 'requested' AND o.courier_id IS NULL
+         AND o.shipping_lat IS NOT NULL 
+         AND o.shipping_lng IS NOT NULL
        ORDER BY o.placed_at ASC`
     );
-    return res.json({ success: true, data: routes });
+
+    let filtered = orders;
+    if (Number.isFinite(courierLat) && Number.isFinite(courierLng)) {
+      filtered = orders
+        .map(o => ({
+          ...o,
+          distance_from_courier_km: haversineDistance(
+            courierLat, courierLng,
+            parseFloat(o.shipping_lat), parseFloat(o.shipping_lng)
+          ),
+        }))
+        .filter(o => o.distance_from_courier_km <= radiusKm)
+        .sort((a, b) => a.distance_from_courier_km - b.distance_from_courier_km);
+    }
+
+    return res.json({ success: true, data: filtered });
   } catch (err) {
     console.error("[COURIER ROUTES] Error:", err);
     return sendError(res, err, "Gagal mengambil rute");
@@ -963,3 +1015,4 @@ router.put("/admin/:id/status", requireAuth, requireRole("superadmin"), async (r
 });
 
 module.exports = router;
+
