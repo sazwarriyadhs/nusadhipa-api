@@ -277,9 +277,6 @@ router.post(
     let totalWeight = 0;
     const orderItems = [];
 
-    // Ambil customer_type buyer
-    // Mode penjualan ditentukan eksplisit pada setiap item order.
-
     for (const item of items) {
       const variant = variants.find((v) => v.id === Number(item.variant_id));
       if (!variant) continue;
@@ -728,4 +725,66 @@ router.patch(
     }
   })
 );
+
+// ============================================================
+// POST /api/v1/orders/:publicId/claim-pickup
+// Tenant klaim pickup → claim_status = 'requested'
+// ============================================================
+router.post(
+  "/orders/:publicId/claim-pickup",
+  asyncRoute(async (req, res) => {
+    const publicId = req.params.publicId;
+
+    const [orders] = await db.execute(
+      `SELECT id, order_number, status, claim_status
+       FROM orders
+       WHERE public_id = ?
+       LIMIT 1`,
+      [publicId]
+    );
+
+    if (orders.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Order tidak ditemukan.",
+      });
+    }
+
+    const order = orders[0];
+
+    // Cek status order (harus paid/processing)
+    if (!["paid", "processing"].includes(order.status)) {
+      return res.status(400).json({
+        success: false,
+        message: "Order belum dibayar atau tidak bisa diklaim.",
+      });
+    }
+
+    // Cek apakah udah pernah diklaim
+    if (order.claim_status === "requested" || order.claim_status === "taken") {
+      return res.status(409).json({
+        success: false,
+        message: "Order sudah diklaim pickup.",
+      });
+    }
+
+    // Update claim_status
+    await db.execute(
+      `UPDATE orders
+       SET claim_status = 'requested', updated_at = NOW()
+       WHERE id = ?`,
+      [order.id]
+    );
+
+    res.json({
+      success: true,
+      message: "Pickup berhasil diklaim. Kurir akan segera datang.",
+      data: {
+        order_number: order.order_number,
+        claim_status: "requested",
+      },
+    });
+  })
+);
+
 module.exports = router;
