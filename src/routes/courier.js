@@ -439,76 +439,32 @@ router.get("/routes/mine", requireCourierAuth, async (req, res) => {
 // ============================================================
 router.post("/routes/:id/complete", requireCourierAuth, async (req, res) => {
   const routeId = parseId(req.params.id);
-
-  if (!routeId) {
-    return res.status(400).json({
-      success: false,
-      message: "ID rute tidak valid.",
-    });
-  }
-
-  let connection;
+  if (!routeId) return res.status(400).json({ success: false, message: "ID tidak valid." });
 
   try {
-    connection = await db.getConnection();
-    await connection.beginTransaction();
-
-    const [routes] = await connection.execute(
-      `SELECT id, fee, status
-       FROM courier_routes
-       WHERE id = ? AND courier_id = ?
-       FOR UPDATE`,
-      [routeId, req.courier.id]
+    const [orders] = await db.execute(
+      `SELECT id, order_number, claim_status, courier_id 
+       FROM orders WHERE id = ? LIMIT 1`,
+      [routeId]
     );
-
-    if (!routes.length) {
-      await connection.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "Rute tidak ditemukan untuk akun kurir ini.",
-      });
+    if (!orders.length) return res.status(404).json({ success: false, message: "Order tidak ditemukan." });
+    if (orders[0].courier_id !== req.courier.id) {
+      return res.status(403).json({ success: false, message: "Order bukan milik kurir ini." });
+    }
+    if (orders[0].claim_status !== 'taken') {
+      return res.status(409).json({ success: false, message: "Order tidak berstatus taken." });
     }
 
-    if (routes[0].status !== "taken") {
-      await connection.rollback();
-      return res.status(409).json({
-        success: false,
-        message: "Rute tidak berstatus sedang dikerjakan.",
-      });
-    }
-
-    await connection.execute(
-      `UPDATE courier_routes
-       SET status = 'completed'
-       WHERE id = ? AND courier_id = ?`,
-      [routeId, req.courier.id]
+    await db.execute(
+      `UPDATE orders 
+       SET claim_status = 'completed', status = 'completed', completed_at = NOW(), updated_at = NOW()
+       WHERE id = ?`,
+      [routeId]
     );
 
-    await connection.execute(
-      `INSERT INTO courier_earnings
-         (courier_id, route_id, amount, status)
-       VALUES (?, ?, ?, 'available')`,
-      [req.courier.id, routeId, parseMoney(routes[0].fee)]
-    );
-
-    await connection.execute(
-      `UPDATE courier_claims
-       SET status = 'completed'
-       WHERE courier_id = ? AND route_id = ?`,
-      [req.courier.id, routeId]
-    );
-
-    await connection.commit();
-
-    return res.json({
-      success: true,
-      message: "Rute berhasil diselesaikan.",
-    });
+    res.json({ success: true, message: "Pengantaran selesai.", data: { order_number: orders[0].order_number } });
   } catch (err) {
-    if (connection) await connection.rollback().catch(() => {});
-    return sendError(res, err, "Gagal menyelesaikan rute");
-  } finally {
-    if (connection) connection.release();
+    return sendError(res, err, "Gagal menyelesaikan pengantaran");
   }
 });
 
@@ -1017,6 +973,7 @@ router.put("/admin/:id/status", requireAuth, requireRole("superadmin"), async (r
 });
 
 module.exports = router;
+
 
 
 
