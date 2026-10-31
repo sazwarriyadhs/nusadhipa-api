@@ -109,6 +109,8 @@ router.get("/businesses/me", async (req, res, next) => {
       nib: biz.nib,
       tax_number: biz.tax_number,
       halal_certificate_url: biz.halal_certificate_url,
+      halal_certificate_number: biz.halal_certificate_number,
+      halal_owner_name: biz.halal_owner_name,
       kbli_code: biz.kbli_code,
       kbli_name: biz.kbli_name,
       verification_status: biz.verification_status,
