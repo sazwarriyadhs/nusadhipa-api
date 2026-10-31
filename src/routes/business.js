@@ -70,6 +70,8 @@ router.get("/businesses/me", async (req, res, next) => {
         description, logo_url, banner_url, email, phone,
         province, city, address, nib, tax_number,
         halal_certificate_url,
+        halal_certificate_number,
+        halal_owner_name,
         kbli_code, kbli_name, verification_status, status
        FROM businesses
        WHERE id = ? LIMIT 1`,
