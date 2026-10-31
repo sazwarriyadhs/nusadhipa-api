@@ -550,7 +550,7 @@ router.get("/businesses/me", requireAuth, asyncRoute(async (req, res) => {
   const [rows] = await db.execute(`
     SELECT 
       b.id, b.public_id, b.business_name, b.legal_name, b.slug,
-      b.business_type, b.description, b.logo_url, b.banner_url, b.instagram_url, b.tiktok_url, b.facebook_url, b.website_url,
+      b.business_type, b.description, b.logo_url, b.banner_url,
       b.halal_certificate_number, b.halal_owner_name,
       b.email, b.phone, b.province, b.city, b.address, b.nib, b.tax_number, b.kbli_code, b.kbli_name, b.verification_status, b.status, (SELECT COUNT(*) FROM products p WHERE p.business_id = b.id AND p.status = 'active') AS product_count FROM businesses b WHERE b.owner_user_id = ? AND b.status = 'active'
     LIMIT 1
@@ -595,7 +595,7 @@ router.get("/businesses/:slug", asyncRoute(async (req, res) => {
   const [rows] = await db.execute(`
     SELECT 
       b.id, b.public_id, b.business_name, b.legal_name, b.slug,
-      b.business_type, b.description, b.logo_url, b.banner_url, b.instagram_url, b.tiktok_url, b.facebook_url, b.website_url,
+      b.business_type, b.description, b.logo_url, b.banner_url,
       b.halal_certificate_number, b.halal_owner_name,
       b.email, b.phone, b.province, b.city, b.address, b.nib, b.tax_number, b.kbli_code, b.kbli_name, b.verification_status, b.status, (SELECT COUNT(*) FROM products p WHERE p.business_id = b.id AND p.status = 'active') AS product_count FROM businesses b WHERE b.slug = ? AND b.status = 'active'
     LIMIT 1
@@ -642,7 +642,3 @@ router.get("/businesses", asyncRoute(async (req, res) => {
 }));
 
 module.exports = router;
-
-
-
-
