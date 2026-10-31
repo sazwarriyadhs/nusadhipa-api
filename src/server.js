@@ -114,7 +114,7 @@ app.get("/api/v1/health/db", async (_req, res) => {
 // ===== Daftar route API =====
 app.use("/api/v1", require("./routes/auth"));
 app.use("/api/v1", require("./routes/business-locations"));
-app.use("/api/v1", require("./routes/business"));
+// app.use("/api/v1", require("./routes/business")); // Di-disable karena duplikat dengan catalog.js
 app.use("/api/v1", require("./routes/orders"));
 app.use("/api/v1", require("./routes/cart"));
 app.use("/api/v1", require("./routes/shipments"));
