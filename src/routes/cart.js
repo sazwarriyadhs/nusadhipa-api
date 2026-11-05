@@ -4,6 +4,7 @@ const express = require("express");
 const db = require("../db");
 
 const router = express.Router();
+const requireAuth = require("../middleware/require-auth");
 
 function asyncRoute(handler) {
   return (req, res, next) =>
@@ -43,14 +44,23 @@ function resolvePolicy(variant, requestedMode) {
     }
 
     const price = Number(variant.retail_price ?? variant.price);
+    const step = Number(variant.quantity_step ?? 1);
+
     const validPrice = Number.isFinite(price) && price > 0;
+    const validStep = Number.isSafeInteger(step) && step >= 1;
+    const available = validPrice && validStep;
 
     return {
-      mode: "package", available: validPrice,
-      reason: validPrice ? null : "Harga kemasan belum ditetapkan.",
-      minQty: 1, maxQty: Number.POSITIVE_INFINITY,
-      step: Number(variant.quantity_step ?? 1),
-      price: validPrice ? price : 0, unit: "unit"
+      mode: "package",
+      available,
+      reason: !validStep
+        ? "Konfigurasi quantity_step kemasan tidak valid."
+        : (!validPrice ? "Harga kemasan belum ditetapkan." : null),
+      minQty: validStep ? step : 0,
+      maxQty: Number.POSITIVE_INFINITY,
+      step: validStep ? step : 0,
+      price: validPrice ? price : 0,
+      unit: "unit"
     };
   }
 
@@ -71,7 +81,7 @@ function resolvePolicy(variant, requestedMode) {
     };
   }
 
-  const isSauriFresh = brand === "sauri fresh";
+  const isSauriFresh = String(brand || "").trim().toLowerCase() === "sauri fresh";
   const configuredRetailMin = Number(variant.min_retail_kg ?? 0.5);
   const configuredB2BMin = Number(variant.min_b2b_kg ?? 50);
   const retailStep = Number(variant.retail_step_kg ?? 0.5);
@@ -163,15 +173,38 @@ async function getOrCreateActiveCart(conn, userId) {
 // ============================================================
 router.get(
   "/cart",
+  requireAuth,
   asyncRoute(async (req, res) => {
-    const userId = Number(req.query.user_id || req.body?.user_id || 9);
+    const userId = req.user?.id || Number(req.query.user_id || req.body?.user_id || 0);
+    if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
     if (!Number.isSafeInteger(userId) || userId <= 0) {
       return res.status(400).json({ success: false, message: "user_id tidak valid." });
     }
 
     const conn = await db.getConnection();
     try {
-      const cartId = await getOrCreateActiveCart(conn, userId);
+      const [activeCarts] = await conn.execute(
+        `SELECT id FROM carts
+         WHERE user_id = ? AND status = 'active'
+         LIMIT 1`,
+        [userId]
+      );
+
+      if (activeCarts.length === 0) {
+        return res.json({
+          success: true,
+          data: {
+            cart_id: null,
+            currency: "IDR",
+            items: [],
+            items_count: 0,
+            subtotal: 0,
+            can_checkout: false
+          }
+        });
+      }
+
+      const cartId = activeCarts[0].id;
 
       const [items] = await conn.execute(
         `SELECT
@@ -183,7 +216,8 @@ router.get(
           pv.retail_step_kg, pv.b2b_step_kg,
           p.id AS product_id, p.public_id AS product_public_id,
           p.name AS product_name, p.brand AS product_brand, p.business_id,
-          b.business_name,
+          b.business_name, b.city AS business_city, b.province AS business_province,
+          b.latitude AS business_lat, b.longitude AS business_lng,
           (SELECT pi.image_url
            FROM product_images pi
            WHERE pi.product_id = p.id AND pi.is_primary = 1
@@ -203,6 +237,11 @@ router.get(
       );
 
       const mapped = items.map((it) => {
+        const businessCity = it.business_city || null;
+        const businessProvince = it.business_province || null;
+        const businessLat = it.business_lat ? Number(it.business_lat) : null;
+        const businessLng = it.business_lng ? Number(it.business_lng) : null;
+        const weightGrams = Number(it.weight_grams) || 500;
         const qty = Number(it.quantity);
         const stock = Number(it.available_stock);
         const policy = resolvePolicy(it, it.selling_mode);
@@ -221,6 +260,10 @@ router.get(
           sku: it.sku,
           business_id: it.business_id,
           business_name: it.business_name,
+          business_city: it.business_city || null,
+          business_province: it.business_province || null,
+          business_lat: it.business_lat != null ? Number(it.business_lat) : null,
+          business_lng: it.business_lng != null ? Number(it.business_lng) : null,
           image_url: it.image_url,
           selling_mode: it.selling_mode,
           mode: policy.mode,
@@ -542,5 +585,7 @@ router.delete(
 );
 
 module.exports = router;
+
+
 
 
