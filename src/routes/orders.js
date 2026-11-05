@@ -2,7 +2,6 @@ const express = require("express");
 const db = require("../db");
 
 const router = express.Router();
-const requireAuth = require("../middleware/require-auth");
 
 function asyncRoute(handler) {
   return (req, res, next) =>
@@ -10,24 +9,18 @@ function asyncRoute(handler) {
 }
 
 // GET /api/v1/orders
-// Daftar pesanan untuk tenant (business_id dari auth)
+// Daftar pesanan untuk tenant (business_id = 1, sementara hardcode)
 router.get(
   "/orders",
-  requireAuth,
   asyncRoute(async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
     const offset = (page - 1) * limit;
     const status = req.query.status?.trim() || null;
-// Resolve business milik user yang login
-    const [bizRows] = await db.execute(
-      "SELECT id FROM businesses WHERE owner_user_id = ? AND status IN ('draft','active') LIMIT 1",
-      [req.user.id]
-    );
-    if (!bizRows.length) {
-      return res.status(403).json({ success: false, message: "Akun tidak memiliki business." });
-    }
-    const businessId = bizRows[0].id;
+
+    // Sementara: business_id = 1
+    const businessId = 1;
+
     const conditions = ["oi.business_id = ?"];
     const params = [businessId];
 
@@ -115,17 +108,8 @@ router.get(
 // Detail pesanan
 router.get(
   "/orders/:publicId",
-  requireAuth,
   asyncRoute(async (req, res) => {
-// Resolve business milik user yang login
-    const [bizRows] = await db.execute(
-      "SELECT id FROM businesses WHERE owner_user_id = ? AND status IN ('draft','active') LIMIT 1",
-      [req.user.id]
-    );
-    if (!bizRows.length) {
-      return res.status(403).json({ success: false, message: "Akun tidak memiliki business." });
-    }
-    const businessId = bizRows[0].id;
+    const businessId = 1;
     const publicId = req.params.publicId;
 
     const [orders] = await db.execute(
@@ -209,6 +193,8 @@ router.get(
 router.post(
   "/orders",
   asyncRoute(async (req, res) => {
+    const businessId = 1; // sementara
+
     // Buyer: pakai user_id dari request (kalau ada), atau guest buyer
     let buyerUserId = Number(req.body?.buyer_user_id) || null;
     if (!buyerUserId) {
@@ -440,10 +426,6 @@ router.post(
       });
     }
 
-    // ===== ROUND SUBTOTAL KE INTEGER =====
-    // selling_price = bigint, target_net harus integer
-    const targetNet = Math.round(subtotal);
-
     // Batas retail SAURI FRESH berlaku pada total seluruh baris
     // untuk varian yang sama, bukan hanya setiap baris satu per satu.
     const sauriFreshRetailByVariant = new Map();
@@ -477,63 +459,13 @@ router.post(
       ? 0
       : Math.round(BASE_COST + (distance - FREE_RADIUS) * COST_PER_KM);
 
-    // ===== PRICING: Hitung gross-up =====
-    const { calculatePricing } = require("../services/pricing-calculator");
-
-    const paymentProviderId = Number(req.body?.payment_provider_id);
-    if (!paymentProviderId) {
-      return res.status(400).json({
-        success: false,
-        message: "payment_provider_id wajib diisi.",
-      });
-    }
-
-    const [providerRows] = await db.execute(
-      `SELECT id, code, name, fee_type, fee_percentage, fee_flat, fee_min, fee_max, tax_percentage
-       FROM payment_providers
-       WHERE id = ? AND is_active = 1
-       LIMIT 1`,
-      [paymentProviderId]
-    );
-
-    if (providerRows.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Payment provider tidak ditemukan atau tidak aktif.",
-      });
-    }
-
-    const provider = providerRows[0];
-
-    // ===== DEBUG PROVIDER =====
-    console.log('=== DEBUG PROVIDER ===');
-    console.log(JSON.stringify(provider, null, 2));
-    console.log('======================');
-
-    let pricing;
-    try {
-      pricing = calculatePricing({
-        targetNet: targetNet,
-        commissionRate: 0.02,
-        commissionPpnRate: 0.11,
-        provider: provider,
-        pph23Rate: 0,
-      });
-    } catch (err) {
-      return res.status(400).json({
-        success: false,
-        message: `Gagal menghitung pricing: ${err.message}`,
-      });
-    }
-
-    const grandTotal = pricing.sellingPrice + shippingTotal;
+    const grandTotal = subtotal + shippingTotal;
 
     // ===== INSERT ORDER =====
     const crypto = require("crypto");
     const publicId = crypto.randomUUID();
     const now = new Date();
     // ===== VALIDASI KURIR NUSA-DHIPA =====
-    // Ambil data bisnis penjual untuk cek kota
     const firstVariantId = orderItems[0]?.variant_id;
     const [[variantData]] = await db.execute(
       `SELECT p.business_id, b.city, b.province 
@@ -543,27 +475,16 @@ router.post(
        WHERE pv.id = ? LIMIT 1`,
       [firstVariantId]
     );
-
     if (variantData) {
       const sellerCity = (variantData.city || "").toLowerCase().trim();
       const sellerProvince = (variantData.province || "").toLowerCase().trim();
       const buyerCity = (shipping_address.city || "").toLowerCase().trim();
       const buyerProvince = (shipping_address.province || "").toLowerCase().trim();
-
-      // Cek apakah luar kota (beda kota ATAU beda provinsi)
-      const isOutsideCity = (sellerCity && buyerCity && sellerCity !== buyerCity) || 
-                            (sellerProvince && buyerProvince && sellerProvince !== buyerProvince);
-
-      // Cek berat > 100 kg (100.000 gram)
+      const isOutsideCity = (sellerCity && buyerCity && sellerCity !== buyerCity) || (sellerProvince && buyerProvince && sellerProvince !== buyerProvince);
       const isOver100Kg = totalWeight > 100000;
-
       if (isOutsideCity || isOver100Kg) {
-        // Paksa kurir NUSA-DHIPA
         if (String(courier).toUpperCase() !== "NUSA-DHIPA") {
-          return res.status(400).json({
-            success: false,
-            message: "Pesanan luar kota atau berat > 100kg wajib menggunakan kurir NUSA-DHIPA.",
-          });
+          return res.status(400).json({ success: false, message: "Pesanan luar kota atau berat > 100kg wajib menggunakan kurir NUSA-DHIPA." });
         }
       }
     }
@@ -630,30 +551,11 @@ router.post(
         `INSERT INTO orders (
           public_id, order_number, buyer_user_id, status, currency,
           subtotal, discount_total, shipping_total, tax_total, platform_fee,
-          selling_price, grand_total,
-          commission_amount, commission_ppn_amount,
-          payment_fee_amount, payment_fee_flat_amount, payment_ppn_amount,
-          pph23_amount, tenant_net_amount, rounding_adjustment,
-          payment_provider_id, pricing_snapshot,
-          shipping_address, customer_note, placed_at, shipping_distance_km
-        ) VALUES (
-          ?, ?, ?, 'pending_payment', 'IDR',
-          ?, 0, ?, 0, 0,
-          ?, ?,
-          ?, ?,
-          ?, ?, ?,
-          ?, ?, ?,
-          ?, ?,
-          ?, ?, ?, ?
-        )`,
+          grand_total, shipping_address, customer_note, placed_at, shipping_distance_km
+        ) VALUES (?, ?, ?, 'pending_payment', 'IDR', ?, 0, ?, 0, 0, ?, ?, ?, ?, ?)`,
         [
           publicId, orderNumber, buyerUserId,
-          subtotal, shippingTotal,
-          pricing.sellingPrice, grandTotal,
-          pricing.commission, pricing.commissionPpn,
-          pricing.paymentFee, provider.fee_flat || 0, pricing.paymentPpn,
-          pricing.pph23, pricing.tenantNet, pricing.roundingAdjustment,
-          paymentProviderId, JSON.stringify(pricing.snapshot),
+          subtotal, shippingTotal, grandTotal,
           shippingAddressJson, customer_note || null, now,
           distance || null,
         ]
@@ -712,25 +614,9 @@ router.post(
       data: {
         public_id: publicId,
         order_number: orderNumber,
-        subtotal,
-        selling_price: pricing.sellingPrice,
-        shipping_total: shippingTotal,
         grand_total: grandTotal,
-        pricing_breakdown: {
-          target_net: targetNet,
-          commission: pricing.commission,
-          commission_ppn: pricing.commissionPpn,
-          payment_fee: pricing.paymentFee,
-          payment_ppn: pricing.paymentPpn,
-          pph23: pricing.pph23,
-          tenant_net: pricing.tenantNet,
-          rounding_adjustment: pricing.roundingAdjustment,
-        },
-        payment_provider: {
-          id: provider.id,
-          code: provider.code,
-          name: provider.name,
-        },
+        subtotal,
+        shipping_total: shippingTotal,
         items_count: orderItems.length,
         total_weight: totalWeight,
       },
@@ -957,5 +843,3 @@ router.post("/orders/:publicId/assign-courier", asyncRoute(async (req, res) => {
 }));
 
 module.exports = router;
-
-

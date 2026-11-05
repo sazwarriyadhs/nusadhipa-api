@@ -44,23 +44,14 @@ function resolvePolicy(variant, requestedMode) {
     }
 
     const price = Number(variant.retail_price ?? variant.price);
-    const step = Number(variant.quantity_step ?? 1);
-
     const validPrice = Number.isFinite(price) && price > 0;
-    const validStep = Number.isSafeInteger(step) && step >= 1;
-    const available = validPrice && validStep;
 
     return {
-      mode: "package",
-      available,
-      reason: !validStep
-        ? "Konfigurasi quantity_step kemasan tidak valid."
-        : (!validPrice ? "Harga kemasan belum ditetapkan." : null),
-      minQty: validStep ? step : 0,
-      maxQty: Number.POSITIVE_INFINITY,
-      step: validStep ? step : 0,
-      price: validPrice ? price : 0,
-      unit: "unit"
+      mode: "package", available: validPrice,
+      reason: validPrice ? null : "Harga kemasan belum ditetapkan.",
+      minQty: 1, maxQty: Number.POSITIVE_INFINITY,
+      step: Number(variant.quantity_step ?? 1),
+      price: validPrice ? price : 0, unit: "unit"
     };
   }
 
@@ -81,7 +72,7 @@ function resolvePolicy(variant, requestedMode) {
     };
   }
 
-  const isSauriFresh = String(brand || "").trim().toLowerCase() === "sauri fresh";
+  const isSauriFresh = brand === "sauri fresh";
   const configuredRetailMin = Number(variant.min_retail_kg ?? 0.5);
   const configuredB2BMin = Number(variant.min_b2b_kg ?? 50);
   const retailStep = Number(variant.retail_step_kg ?? 0.5);
@@ -183,28 +174,7 @@ router.get(
 
     const conn = await db.getConnection();
     try {
-      const [activeCarts] = await conn.execute(
-        `SELECT id FROM carts
-         WHERE user_id = ? AND status = 'active'
-         LIMIT 1`,
-        [userId]
-      );
-
-      if (activeCarts.length === 0) {
-        return res.json({
-          success: true,
-          data: {
-            cart_id: null,
-            currency: "IDR",
-            items: [],
-            items_count: 0,
-            subtotal: 0,
-            can_checkout: false
-          }
-        });
-      }
-
-      const cartId = activeCarts[0].id;
+      const cartId = await getOrCreateActiveCart(conn, userId);
 
       const [items] = await conn.execute(
         `SELECT
@@ -237,11 +207,6 @@ router.get(
       );
 
       const mapped = items.map((it) => {
-        const businessCity = it.business_city || null;
-        const businessProvince = it.business_province || null;
-        const businessLat = it.business_lat ? Number(it.business_lat) : null;
-        const businessLng = it.business_lng ? Number(it.business_lng) : null;
-        const weightGrams = Number(it.weight_grams) || 500;
         const qty = Number(it.quantity);
         const stock = Number(it.available_stock);
         const policy = resolvePolicy(it, it.selling_mode);
@@ -585,7 +550,5 @@ router.delete(
 );
 
 module.exports = router;
-
-
 
 
