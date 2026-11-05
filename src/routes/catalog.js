@@ -2,6 +2,7 @@ const express = require("express");
 const multer = require("multer");
 const db = require("../db");
 const requireAuth = require("../middleware/require-auth");
+const requireBusiness = require("../middleware/require-business");
 const { uploadToCloudinary } = require("../cloudinary");
 
 const router = express.Router();
@@ -114,6 +115,7 @@ router.get("/products", asyncRoute(async (req, res) => {
       c.slug AS category_slug,
       b.business_name,
       b.slug AS business_slug,
+      variants.first_variant_id AS variant_id,
       variants.min_price,
       variants.max_price,
       variants.available_stock,
@@ -137,6 +139,7 @@ router.get("/products", asyncRoute(async (req, res) => {
     JOIN (
       SELECT
         pv.product_id,
+        MIN(pv.id) AS first_variant_id,
         MIN(pv.price) AS min_price,
         MAX(pv.price) AS max_price,
         MIN(pv.retail_price) AS min_retail_price,
@@ -234,6 +237,7 @@ router.get("/products/:slug", asyncRoute(async (req, res) => {
       pv.min_b2b_kg,
       pv.retail_step_kg,
       pv.b2b_step_kg,
+      pv.quantity_step,
       pv.selling_unit,
       pv.sales_mode,
       pv.weight_grams,
@@ -266,8 +270,8 @@ router.get("/products/:slug", asyncRoute(async (req, res) => {
 // ============================================================
 // POST /api/v1/products — Tambah produk baru
 // ============================================================
-router.post("/products", asyncRoute(async (req, res) => {
-  const businessId = 1;
+router.post("/products", requireAuth, requireBusiness, asyncRoute(async (req, res) => {
+  const businessId = req.business.id;
 
   const { name, price, stock, description, category_slug, sku } = req.body || {};
 
@@ -355,13 +359,14 @@ router.post("/products", asyncRoute(async (req, res) => {
 router.post(
   "/products/:publicId/images",
   requireAuth,
+  requireBusiness,
   productImageUpload.single("image"),
   asyncRoute(async (req, res) => {
     const { publicId } = req.params;
 
     const [products] = await db.execute(
-      "SELECT id FROM products WHERE public_id = ? LIMIT 1",
-      [publicId]
+      "SELECT id FROM products WHERE public_id = ? AND business_id = ? LIMIT 1",
+      [publicId, req.business.id]
     );
 
     if (products.length === 0) {
@@ -409,13 +414,13 @@ router.post(
 // ============================================================
 // PUT /api/v1/products/:publicId — Update produk
 // ============================================================
-router.put("/products/:publicId", asyncRoute(async (req, res) => {
+router.put("/products/:publicId", requireAuth, requireBusiness, asyncRoute(async (req, res) => {
   const publicId = req.params.publicId;
   const { name, price, stock, description, category_slug } = req.body || {};
 
   const [products] = await db.execute(
-    "SELECT id FROM products WHERE public_id = ? LIMIT 1",
-    [publicId]
+    "SELECT id FROM products WHERE public_id = ? AND business_id = ? LIMIT 1",
+    [publicId, req.business.id]
   );
   if (products.length === 0) {
     return res.status(404).json({ success: false, message: "Produk tidak ditemukan." });
@@ -514,12 +519,12 @@ router.put("/products/:publicId", asyncRoute(async (req, res) => {
 // ============================================================
 // DELETE /api/v1/products/:publicId — Hapus produk
 // ============================================================
-router.delete("/products/:publicId", asyncRoute(async (req, res) => {
+router.delete("/products/:publicId", requireAuth, requireBusiness, asyncRoute(async (req, res) => {
   const publicId = req.params.publicId;
 
   const [products] = await db.execute(
-    "SELECT id FROM products WHERE public_id = ? LIMIT 1",
-    [publicId]
+    "SELECT id FROM products WHERE public_id = ? AND business_id = ? LIMIT 1",
+    [publicId, req.business.id]
   );
   if (products.length === 0) {
     return res.status(404).json({ success: false, message: "Produk tidak ditemukan." });
@@ -552,7 +557,7 @@ router.get("/businesses/me", requireAuth, asyncRoute(async (req, res) => {
       b.id, b.public_id, b.business_name, b.legal_name, b.slug,
       b.business_type, b.description, b.logo_url, b.banner_url,
       b.halal_certificate_number, b.halal_owner_name,
-      b.email, b.phone, b.province, b.city, b.address, b.nib, b.tax_number, b.kbli_code, b.kbli_name, b.verification_status, b.status, (SELECT COUNT(*) FROM products p WHERE p.business_id = b.id AND p.status = 'active') AS product_count FROM businesses b WHERE b.owner_user_id = ? AND b.status = 'active'
+      b.email, b.phone, b.province, b.city, b.address, b.nib, b.tax_number, b.kbli_code, b.kbli_name, b.verification_status, b.status, (SELECT COUNT(*) FROM products p WHERE p.business_id = b.id AND p.status = 'active') AS product_count FROM businesses b WHERE b.owner_user_id = ? AND b.status IN ('draft', 'active')
     LIMIT 1
   `, [userId]);
 
