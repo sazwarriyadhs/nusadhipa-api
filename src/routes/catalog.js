@@ -37,7 +37,7 @@ function positiveInt(value, fallback, max) {
 // ============================================================
 router.get("/categories", asyncRoute(async (req, res) => {
   const [rows] = await db.execute(`
-    SELECT id, parent_id, name, slug, description, image_url, sort_order
+    SELECT id, parent_id, name, slug, description, image_url, sort_order, requires_halal
     FROM categories
     WHERE status = 'active'
     ORDER BY sort_order ASC, name ASC
@@ -647,3 +647,4 @@ router.get("/businesses", asyncRoute(async (req, res) => {
 }));
 
 module.exports = router;
+
