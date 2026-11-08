@@ -76,6 +76,8 @@ function publicCourier(courier) {
     partnership_type: courier.partnership_type || PARTNERSHIP_TYPE,
     plate_number: courier.plate_number,
     city: courier.city,
+      address: courier.address,
+      photo_url: courier.photo_url,
     payout_method: courier.payout_method,
     payout_account: courier.payout_account,
     status: courier.status,
@@ -930,6 +932,8 @@ router.put("/admin/:id/status", requireAuth, requireRole("superadmin"), async (r
 });
 
 module.exports = router;
+
+
 
 
 
