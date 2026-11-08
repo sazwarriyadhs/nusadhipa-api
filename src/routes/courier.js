@@ -400,7 +400,7 @@ router.post("/routes/:id/claim", requireCourierAuth, async (req, res) => {
       `UPDATE orders
        SET courier_id = ?, claim_status = 'taken', claimed_at = NOW()
        WHERE id = ?`,
-      [req.courier.id, routeId]
+      [req.courier.public_id, routeId]
     );
 
     await connection.commit();
@@ -485,7 +485,7 @@ router.get("/earnings", requireCourierAuth, async (req, res) => {
          COALESCE(SUM(CASE WHEN o.claim_status = 'completed' THEN 5000 ELSE 0 END), 0) AS available_balance
        FROM orders o
        WHERE o.courier_id = ?`,
-      [req.courier.id]
+      [req.courier.public_id]
     );
 
     const [rows] = await db.execute(
@@ -493,7 +493,7 @@ router.get("/earnings", requireCourierAuth, async (req, res) => {
        FROM orders o
        WHERE o.courier_id = ? AND o.claim_status = 'completed'
        ORDER BY o.completed_at DESC`,
-      [req.courier.id]
+      [req.courier.public_id]
     );
 
     const summary = summaryRows[0];
@@ -532,7 +532,7 @@ router.get("/deliveries", requireCourierAuth, async (req, res) => {
        WHERE o.courier_id = ? 
          AND o.claim_status IN ('taken', 'completed')
        ORDER BY o.claimed_at DESC`,
-      [req.courier.id]
+      [req.courier.public_id]
     );
     return res.json({ success: true, data: rows });
   } catch (err) {
@@ -566,7 +566,7 @@ router.post("/payouts", requireCourierAuth, async (req, res) => {
       `SELECT id FROM orders 
        WHERE courier_id = ? AND claim_status = 'completed' 
        FOR UPDATE`,
-      [req.courier.id]
+      [req.courier.public_id]
     );
 
     const amount = earningRows.length * 5000;
@@ -579,7 +579,7 @@ router.post("/payouts", requireCourierAuth, async (req, res) => {
     const [payoutResult] = await connection.execute(
       `INSERT INTO courier_payouts (courier_id, amount, method, account_number, status)
        VALUES (?, ?, ?, ?, 'pending')`,
-      [req.courier.id, amount, method, accountNumber]
+      [req.courier.public_id, amount, method, accountNumber]
     );
 
     for (const order of earningRows) {
@@ -615,7 +615,7 @@ router.get("/payouts", requireCourierAuth, async (req, res) => {
        FROM courier_payouts
        WHERE courier_id = ?
        ORDER BY created_at DESC`,
-      [req.courier.id]
+      [req.courier.public_id]
     );
 
     return res.json({ success: true, data: rows });
@@ -932,6 +932,10 @@ router.put("/admin/:id/status", requireAuth, requireRole("superadmin"), async (r
 });
 
 module.exports = router;
+
+
+
+
 
 
 
