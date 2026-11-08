@@ -27,17 +27,23 @@ function normalizeEmail(value) {
 }
 
 router.post("/auth/register", async (req, res, next) => {
+  let conn;
+
   try {
     const fullName =
       typeof req.body?.fullName === "string"
         ? req.body.fullName.trim()
         : "";
+
     const email = normalizeEmail(req.body?.email);
+
     const phone =
       typeof req.body?.phone === "string"
         ? req.body.phone.trim()
         : null;
+
     const password = req.body?.password;
+    const role = req.body?.role;
 
     if (fullName.length < 2 || fullName.length > 150) {
       return res.status(400).json({
@@ -47,7 +53,7 @@ router.post("/auth/register", async (req, res, next) => {
     }
 
     if (
-      email.length > 254 ||
+      email.length > 190 ||
       !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
     ) {
       return res.status(400).json({
@@ -74,7 +80,54 @@ router.post("/auth/register", async (req, res, next) => {
       });
     }
 
+    if (role !== "customer" && role !== "tenant") {
+      return res.status(400).json({
+        success: false,
+        message: "Jenis registrasi tidak valid."
+      });
+    }
+
+    let businessName = null;
+
+    if (role === "tenant") {
+      businessName =
+        typeof req.body?.businessName === "string"
+          ? req.body.businessName.trim()
+          : "";
+
+      const businessCategory =
+        typeof req.body?.businessType === "string"
+          ? req.body.businessType.trim()
+          : "";
+
+      const allowedCategories = [
+        "Makanan & Minuman",
+        "Pertanian & Peternakan",
+        "Fashion & Aksesori",
+        "Elektronik & Digital",
+        "Kesehatan & Kecantikan",
+        "Rumah & Perlengkapan",
+        "Jasa & Layanan",
+        "Lainnya"
+      ];
+
+      if (businessName.length < 2 || businessName.length > 190) {
+        return res.status(400).json({
+          success: false,
+          message: "Nama usaha wajib diisi (2–190 karakter)."
+        });
+      }
+
+      if (!allowedCategories.includes(businessCategory)) {
+        return res.status(400).json({
+          success: false,
+          message: "Kategori usaha tidak valid."
+        });
+      }
+    }
+
     const secret = getJwtSecret();
+
     if (!secret) {
       return res.status(503).json({
         success: false,
@@ -83,38 +136,112 @@ router.post("/auth/register", async (req, res, next) => {
     }
 
     const passwordHash = await bcrypt.hash(password, 12);
-    const publicId = crypto.randomUUID();
+    const userPublicId = crypto.randomUUID();
 
-    // Akun pembeli tidak langsung aktif. Aktivasi admin harus dilakukan
-    // melalui mekanisme admin terotorisasi yang akan dibuat terpisah.
-    const [result] = await pool.execute(
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    const [userResult] = await conn.execute(
       `INSERT INTO users
         (public_id, full_name, email, phone, password_hash, status)
        VALUES (?, ?, ?, ?, ?, 'pending')`,
-      [publicId, fullName, email, phone || null, passwordHash]
+      [
+        userPublicId,
+        fullName,
+        email,
+        phone || null,
+        passwordHash
+      ]
     );
+
+    let business = null;
+
+    if (role === "tenant") {
+      const businessPublicId = crypto.randomUUID();
+
+      const slugBase = businessName
+        .normalize("NFKD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 190);
+
+      const businessSlug =
+        (slugBase || "toko") +
+        "-" +
+        crypto.randomBytes(4).toString("hex");
+
+      const [businessResult] = await conn.execute(
+        `INSERT INTO businesses (
+          public_id,
+          owner_user_id,
+          business_name,
+          slug,
+          business_type,
+          email,
+          phone,
+          verification_status,
+          status,
+          can_sell
+        ) VALUES (?, ?, ?, ?, 'umkm', ?, ?, 'unverified', 'draft', 0)`,
+        [
+          businessPublicId,
+          userResult.insertId,
+          businessName,
+          businessSlug,
+          email,
+          phone || null
+        ]
+      );
+
+      business = {
+        id: String(businessResult.insertId),
+        publicId: businessPublicId,
+        name: businessName,
+        slug: businessSlug,
+        businessType: "umkm",
+        status: "draft",
+        verificationStatus: "unverified",
+        canSell: false
+      };
+    }
+
+    await conn.commit();
 
     return res.status(201).json({
       success: true,
-      message: "Registrasi berhasil. Akun menunggu aktivasi admin.",
+      message: role === "tenant"
+        ? "Pendaftaran mitra berhasil. Akun menunggu aktivasi admin dan toko menunggu verifikasi."
+        : "Registrasi berhasil. Akun menunggu aktivasi admin.",
       user: {
-        id: publicId,
+        id: userPublicId,
         fullName,
         email,
-        status: "pending"
-      }
+        status: "pending",
+        role
+      },
+      ...(business ? { business } : {})
     });
   } catch (error) {
+    if (conn) {
+      try {
+        await conn.rollback();
+      } catch (_) {}
+    }
+
     if (error.code === "ER_DUP_ENTRY") {
       return res.status(409).json({
         success: false,
-        message: "Email sudah terdaftar."
+        message: "Email atau identitas bisnis sudah terdaftar."
       });
     }
+
     return next(error);
+  } finally {
+    if (conn) conn.release();
   }
 });
-
 router.post("/auth/login", async (req, res, next) => {
   try {
     const email = normalizeEmail(req.body?.email);

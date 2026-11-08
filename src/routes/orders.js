@@ -1,6 +1,8 @@
 const express = require("express");
 const db = require("../db");
 
+const requireAuth = require("../middleware/require-auth");
+const requireBusiness = require("../middleware/require-business");
 const router = express.Router();
 
 function asyncRoute(handler) {
@@ -10,16 +12,14 @@ function asyncRoute(handler) {
 
 // GET /api/v1/orders
 // Daftar pesanan untuk tenant (business_id = 1, sementara hardcode)
-router.get(
-  "/orders",
-  asyncRoute(async (req, res) => {
+router.get("/orders", requireAuth, requireBusiness, asyncRoute(async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
     const offset = (page - 1) * limit;
     const status = req.query.status?.trim() || null;
 
     // Sementara: business_id = 1
-    const businessId = 1;
+    const businessId = Number(req.business.id);
 
     const conditions = ["oi.business_id = ?"];
     const params = [businessId];
@@ -46,9 +46,9 @@ router.get(
         o.order_number,
         o.status,
         o.currency,
-        o.grand_total,
-        o.subtotal,
-        o.shipping_total,
+        COALESCE(SUM(oi.line_total - oi.discount_amount), 0) AS grand_total,
+        COALESCE(SUM(oi.line_total), 0) AS subtotal,
+        0 AS shipping_total,
         o.shipping_distance_km,
         o.shipping_lat,
         o.shipping_lng,
@@ -106,10 +106,8 @@ router.get(
 
 // GET /api/v1/orders/:publicId
 // Detail pesanan
-router.get(
-  "/orders/:publicId",
-  asyncRoute(async (req, res) => {
-    const businessId = 1;
+router.get("/orders/:publicId", requireAuth, requireBusiness, asyncRoute(async (req, res) => {
+    const businessId = Number(req.business.id);
     const publicId = req.params.publicId;
 
     const [orders] = await db.execute(
@@ -123,8 +121,12 @@ router.get(
        FROM orders o
        LEFT JOIN users u ON u.id = o.buyer_user_id
        WHERE o.public_id = ?
+          AND EXISTS (
+            SELECT 1 FROM order_items oi
+            WHERE oi.order_id = o.id AND oi.business_id = ?
+          )
        LIMIT 1`,
-      [publicId]
+      [publicId, businessId]
     );
 
     if (orders.length === 0) {
@@ -138,13 +140,16 @@ router.get(
 
     const [items] = await db.execute(
       `SELECT 
-        product_name, variant_name, sku,
-        quantity, unit_price, line_total
+        product_name, variant_name, sku, quantity, unit_price, discount_amount, line_total
        FROM order_items
        WHERE order_id = ? AND business_id = ?
        ORDER BY id ASC`,
       [order.id, businessId]
     );
+
+    const tenantSubtotal = items.reduce((sum, item) => sum + Number(item.line_total || 0), 0);
+    const tenantDiscount = items.reduce((sum, item) => sum + Number(item.discount_amount || 0), 0);
+    const tenantItemTotal = tenantSubtotal - tenantDiscount;
 
     res.json({
       success: true,
@@ -153,10 +158,11 @@ router.get(
         order_number: order.order_number,
         status: order.status,
         currency: order.currency,
-        subtotal: Number(order.subtotal),
-        discount_total: Number(order.discount_total),
-        shipping_total: Number(order.shipping_total),
-        grand_total: Number(order.grand_total),
+        subtotal: tenantSubtotal,
+        discount_total: tenantDiscount,
+        shipping_total: 0,
+        grand_total: tenantItemTotal,
+        financial_scope: "tenant_items_only",
         shipping_address: order.shipping_address,
         shipping_distance_km: order.shipping_distance_km != null
           ? Number(order.shipping_distance_km)
@@ -179,6 +185,7 @@ router.get(
           sku: it.sku,
           quantity: Number(it.quantity),
           unit_price: Number(it.unit_price),
+          discount_amount: Number(it.discount_amount || 0),
           line_total: Number(it.line_total),
         })),
       },
@@ -192,16 +199,17 @@ router.get(
 // ============================================================
 router.post(
   "/orders",
+  requireAuth,
   asyncRoute(async (req, res) => {
-    const businessId = 1; // sementara
 
-    // Buyer: pakai user_id dari request (kalau ada), atau guest buyer
-    let buyerUserId = Number(req.body?.buyer_user_id) || null;
-    if (!buyerUserId) {
-      const [guests] = await db.execute(
-        "SELECT id FROM users WHERE email = 'guest.buyer@nusadhipa.shop' LIMIT 1"
-      );
-      buyerUserId = guests.length > 0 ? guests[0].id : 1;
+    // Identitas pembeli wajib berasal dari JWT yang telah diverifikasi.
+    const buyerUserId = Number(req.user.id);
+
+    if (!Number.isSafeInteger(buyerUserId) || buyerUserId <= 0) {
+      return res.status(401).json({
+        success: false,
+        message: "Identitas pembeli tidak valid.",
+      });
     }
 
     const {
@@ -331,10 +339,10 @@ router.post(
         const isSauriFresh =
           String(variant.product_brand || "").trim().toUpperCase() === "SAURI FRESH";
 
-        const minRetail = isSauriFresh ? 1 : Number(variant.min_retail_kg ?? 0.5);
-        const minB2B = isSauriFresh ? 100 : Number(variant.min_b2b_kg ?? 50);
-        const stepRetail = Number(variant.retail_step_kg ?? 0.5);
-        const stepB2B = Number(variant.b2b_step_kg ?? 1);
+        const minRetail = 1;
+        const minB2B = 100;
+        const stepRetail = 1;
+        const stepB2B = 1;
         const priceRetail = Number(variant.retail_price ?? variant.price);
         const priceB2B =
           variant.b2b_price == null ? null : Number(variant.b2b_price);

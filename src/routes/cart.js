@@ -50,7 +50,7 @@ function resolvePolicy(variant, requestedMode) {
       mode: "package", available: validPrice,
       reason: validPrice ? null : "Harga kemasan belum ditetapkan.",
       minQty: 1, maxQty: Number.POSITIVE_INFINITY,
-      step: Number(variant.quantity_step ?? 1),
+      step: 1,
       price: validPrice ? price : 0, unit: "unit"
     };
   }
@@ -73,10 +73,10 @@ function resolvePolicy(variant, requestedMode) {
   }
 
   const isSauriFresh = brand === "sauri fresh";
-  const configuredRetailMin = Number(variant.min_retail_kg ?? 0.5);
-  const configuredB2BMin = Number(variant.min_b2b_kg ?? 50);
-  const retailStep = Number(variant.retail_step_kg ?? 0.5);
-  const b2bStep = Number(variant.b2b_step_kg ?? 1);
+  const configuredRetailMin = 1;
+  const configuredB2BMin = 100;
+  const retailStep = 1;
+  const b2bStep = 1;
 
   const minQty = requestedMode === "b2b"
     ? (isSauriFresh ? Math.max(100, configuredB2BMin) : configuredB2BMin)
@@ -166,7 +166,7 @@ router.get(
   "/cart",
   requireAuth,
   asyncRoute(async (req, res) => {
-    const userId = req.user?.id || Number(req.query.user_id || req.body?.user_id || 0);
+    const userId = Number(req.user.id);
     if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
     if (!Number.isSafeInteger(userId) || userId <= 0) {
       return res.status(400).json({ success: false, message: "user_id tidak valid." });
@@ -269,8 +269,9 @@ router.get(
 );
 router.post(
   "/cart/items",
+  requireAuth,
   asyncRoute(async (req, res) => {
-    const userId = Number(req.body?.user_id || 9);
+    const userId = Number(req.user.id);
     const { variant_id, quantity, selling_mode } = req.body || {};
 
     if (!variant_id) {
@@ -415,8 +416,8 @@ router.post(
 // ============================================================
 router.patch(
   "/cart/items/:id",
-  asyncRoute(async (req, res) => {
-    const userId = Number(req.body?.user_id || 9);
+  requireAuth, asyncRoute(async (req, res) => {
+    const userId = Number(req.user.id);
     const itemId = Number(req.params.id);
     const { quantity } = req.body || {};
 
@@ -508,8 +509,8 @@ router.patch(
 );
 router.delete(
   "/cart/items/:id",
-  asyncRoute(async (req, res) => {
-    const userId = Number(req.body?.user_id || req.query.user_id || 9);
+  requireAuth, asyncRoute(async (req, res) => {
+    const userId = Number(req.user.id);
     const itemId = Number(req.params.id);
 
     const [result] = await db.execute(
@@ -535,8 +536,8 @@ router.delete(
 // ============================================================
 router.delete(
   "/cart",
-  asyncRoute(async (req, res) => {
-    const userId = Number(req.body?.user_id || req.query.user_id || 9);
+  requireAuth, asyncRoute(async (req, res) => {
+    const userId = Number(req.user.id);
 
     await db.execute(
       `DELETE ci FROM cart_items ci

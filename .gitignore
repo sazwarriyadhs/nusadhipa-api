@@ -44,3 +44,6 @@ public/uploads/*
 
 *.bak*
 *.bak*
+# Sensitive local credentials and exported tokens
+/.env.backup_*
+/token.txt

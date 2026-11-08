@@ -18,6 +18,8 @@ const PROFILE_FIELDS = {
   vehicle_type: { max: 50 },
   plate_number: { max: 20 },
   city: { max: 100 },
+  address: { max: 255 },
+  photo_url: { max: 500 },
   payout_account: { max: 100 },
 };
 
@@ -93,7 +95,8 @@ const COURIER_SELECT = `
   id, public_id, name, email, phone,
   vehicle_type,
   COALESCE(partnership_type, 'freelance') AS partnership_type,
-  plate_number, city, payout_method, payout_account,
+  plate_number, city, address, photo_url,
+  payout_method, payout_account,
   status, created_at
 `;
 
@@ -667,6 +670,8 @@ router.post("/register", async (req, res) => {
       vehicle_type: vehicle_type ?? null,
       plate_number: plate_number ?? null,
       city: city ?? null,
+      address: address ?? null,
+      photo_url: photo_url ?? null,
       payout_account: payout_account ?? null,
     };
 
@@ -719,11 +724,7 @@ router.post("/register", async (req, res) => {
     const publicId = crypto.randomUUID();
 
     const [result] = await db.execute(
-      `INSERT INTO couriers
-         (public_id, name, email, phone, password_hash,
-          vehicle_type, partnership_type, plate_number, city,
-          payout_method, payout_account, status)
-       VALUES (?, ?, ?, ?, ?, ?, 'freelance', ?, ?, ?, ?, 'pending')`,
+      `INSERT INTO couriers (public_id, name, email, phone, password_hash, vehicle_type, partnership_type, plate_number, city, address, photo_url, payout_method, payout_account, status) VALUES (?, ?, ?, ?, ?, ?, 'freelance', ?, ?, ?, ?, ?, ?, 'pending')`,
       [
         publicId,
         cleanName,
@@ -733,8 +734,10 @@ router.post("/register", async (req, res) => {
         profileInput.vehicle_type,
         profileInput.plate_number,
         profileInput.city,
-        cleanPayoutMethod,
-        profileInput.payout_account,
+          profileInput.address,
+          profileInput.photo_url,
+          cleanPayoutMethod,
+          profileInput.payout_account,
       ]
     );
 
@@ -864,12 +867,7 @@ router.post("/login", async (req, res) => {
 router.get("/admin/list", requireAuth, requireRole("superadmin"), async (req, res) => {
   try {
     const [rows] = await db.execute(
-      `SELECT
-         id, public_id, name, email, phone,
-         vehicle_type,
-         COALESCE(partnership_type, 'freelance') AS partnership_type,
-         plate_number, city, payout_method, status, created_at
-       FROM couriers
+      `SELECT id, public_id, name, email, phone, vehicle_type, COALESCE(partnership_type, 'freelance') AS partnership_type, plate_number, city, address, photo_url, payout_method, status, created_at FROM couriers
        ORDER BY created_at DESC`
     );
 
@@ -932,6 +930,11 @@ router.put("/admin/:id/status", requireAuth, requireRole("superadmin"), async (r
 });
 
 module.exports = router;
+
+
+
+
+
 
 
 

@@ -130,6 +130,7 @@ app.use("/api/v1/admin", require("./routes/admin"));
 app.use("/api/v1/admin", require("./routes/admin-finance"));
 app.use("/api/v1/admin", require("./routes/admin-settings"));
 app.use("/api/v1/admin", require("./routes/admin-legal"));
+app.use("/api/v1", require("./routes/admin-users"));
 
 // ===== Route legal service (BARU) =====
 app.use("/api/v1/admin/legal-service", require("./routes/legal-service"));
